@@ -2,12 +2,63 @@
 # Local development install.
 #
 # Usage:
-#   cargo build --release               # as your normal user
-#   sudo bash install-dev.sh            # as root (downloads models automatically)
-#   sudo bash install-dev.sh --skip-models   # skip model download
+#   cargo build --release                          # as your normal user
+#   sudo bash install-dev.sh                       # as root
+#   sudo bash install-dev.sh --skip-models         # skip face model download
+#   sudo bash install-dev.sh --skip-ort            # skip ONNX Runtime download
 set -euo pipefail
 
+ORT_VERSION="1.20.1"
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+http_get() {
+  local url="$1" dest="$2"
+  if command -v curl &>/dev/null; then
+    curl -L --progress-bar -o "$dest" "$url"
+  elif command -v wget &>/dev/null; then
+    wget --show-progress -q -O "$dest" "$url"
+  else
+    echo "Error: neither curl nor wget found. Install one and rerun." >&2
+    return 1
+  fi
+}
+
+download_ort() {
+  local arch
+  case "$(uname -m)" in
+    x86_64)  arch="x64" ;;
+    aarch64) arch="aarch64" ;;
+    *)
+      echo "Warning: unsupported architecture $(uname -m) — skipping ORT download." >&2
+      echo "         Install libonnxruntime.so manually and rerun." >&2
+      return 0
+      ;;
+  esac
+
+  local name="onnxruntime-linux-${arch}-${ORT_VERSION}"
+  local url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${name}.tgz"
+  local tmp
+  tmp="$(mktemp -d /tmp/facegate-ort-XXXXXX)"
+
+  echo "    Source : $url"
+  echo "    Size   : ~10 MB"
+  echo ""
+
+  http_get "$url" "$tmp/ort.tgz"
+
+  echo ""
+  echo "    Extracting..."
+  tar -xzf "$tmp/ort.tgz" -C "$tmp"
+
+  echo "    Installing to /usr/lib/..."
+  find "$tmp/$name/lib" -name 'libonnxruntime*.so*' -exec install -Dm755 {} /usr/lib/ \;
+
+  ldconfig
+  rm -rf "$tmp"
+
+  echo "    ONNX Runtime ${ORT_VERSION} installed."
+}
 
 download_models() {
   local models_dir="$1"
@@ -22,28 +73,15 @@ download_models() {
   echo "    Size   : ~400 MB"
   echo ""
 
-  if command -v curl &>/dev/null; then
-    curl -L --progress-bar -o "$tmp_zip" "$url"
-  elif command -v wget &>/dev/null; then
-    wget --show-progress -q -O "$tmp_zip" "$url"
-  else
-    echo "Error: neither curl nor wget found. Install one and rerun." >&2
-    rm -f "$tmp_zip"
-    return 1
-  fi
+  http_get "$url" "$tmp_zip"
 
   echo ""
   echo "    Extracting ONNX models..."
-  # -j junk directory paths, -o overwrite, -n skip if exists
-  unzip -jop "$tmp_zip" "*.onnx" > /dev/null 2>&1 || true
-  unzip -jo  "$tmp_zip" "*.onnx"    -d "$models_dir" 2>/dev/null || \
-  unzip -jo  "$tmp_zip" "*/*.onnx"  -d "$models_dir" 2>/dev/null || true
+  unzip -jo "$tmp_zip" "*.onnx"   -d "$models_dir" 2>/dev/null || \
+  unzip -jo "$tmp_zip" "*/*.onnx" -d "$models_dir" 2>/dev/null || true
 
   rm -f "$tmp_zip"
 
-  # The buffalo_l pack contains det_10g.onnx + w600k_r50.onnx
-  # buffalo_sc contains det_500m.onnx + w600k_mbf.onnx
-  # Rename whichever we got to the names expected by config.toml
   for src in det_10g det_500m; do
     [[ -f "$models_dir/${src}.onnx" ]] && mv "$models_dir/${src}.onnx" "$detector" && break
   done
@@ -59,16 +97,22 @@ download_models() {
     echo "Warning: expected ONNX files not found in the archive." >&2
     echo "         Files in $models_dir:" >&2
     ls "$models_dir" >&2 || true
-    echo ""
     echo "         Update [models] in /etc/facegate/config.toml to match." >&2
   fi
+}
+
+ort_present() {
+  ldconfig -p 2>/dev/null | grep -q libonnxruntime || \
+  ls /usr/lib/libonnxruntime.so* /usr/local/lib/libonnxruntime.so* 2>/dev/null | grep -q .
 }
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 
 SKIP_MODELS=0
+SKIP_ORT=0
 for arg in "$@"; do
   [[ "$arg" == "--skip-models" ]] && SKIP_MODELS=1
+  [[ "$arg" == "--skip-ort"    ]] && SKIP_ORT=1
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -93,7 +137,7 @@ if [[ ! -f target/release/facegate ]]; then
 fi
 
 echo "==> Installing CLI..."
-install -Dm755 target/release/facegate          /usr/bin/facegate
+install -Dm755 target/release/facegate           /usr/bin/facegate
 
 echo "==> Installing PAM module..."
 install -Dm755 target/release/libpam_facegate.so /usr/lib/security/pam_facegate.so
@@ -122,7 +166,17 @@ mkdir -p /usr/share/fish/vendor_completions.d
 echo "==> Installing man page..."
 install -Dm644 docs/facegate.1 /usr/share/man/man1/facegate.1
 
-# ── Models ────────────────────────────────────────────────────────────────────
+# ── ONNX Runtime ──────────────────────────────────────────────────────────────
+if [[ $SKIP_ORT -eq 1 ]]; then
+  echo "==> Skipping ONNX Runtime download (--skip-ort)."
+elif ort_present; then
+  echo "==> ONNX Runtime already present, skipping download."
+else
+  echo "==> Downloading ONNX Runtime ${ORT_VERSION}..."
+  download_ort
+fi
+
+# ── Face recognition models ───────────────────────────────────────────────────
 MODELS_DIR="/usr/share/facegate/models"
 DETECTOR="$MODELS_DIR/scrfd_500m.onnx"
 EMBEDDER="$MODELS_DIR/arcface_w600k_r50.onnx"
@@ -130,7 +184,7 @@ EMBEDDER="$MODELS_DIR/arcface_w600k_r50.onnx"
 if [[ $SKIP_MODELS -eq 1 ]]; then
   echo "==> Skipping model download (--skip-models)."
 elif [[ -f "$DETECTOR" && -f "$EMBEDDER" ]]; then
-  echo "==> Models already present, skipping download."
+  echo "==> Face models already present, skipping download."
 else
   echo "==> Downloading face recognition models..."
   download_models "$MODELS_DIR"
@@ -149,5 +203,5 @@ echo ""
 echo "Next steps:"
 echo "  1. Set your camera:   v4l2-ctl --list-devices  →  sudo facegate configure"
 echo "  2. Check everything:  sudo facegate doctor"
-echo "  3. Enroll your face:  sudo facegate add \$USER --label normal"
+echo "  3. Enroll your face:  sudo facegate add \$USER"
 echo "  4. Test:              sudo facegate test \$USER"

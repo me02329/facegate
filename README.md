@@ -21,16 +21,9 @@ Facegate is a PAM module and CLI tool that lets you unlock `sudo`, login session
 ## Requirements
 
 - Linux with V4L2 camera (`/dev/video*`)
-- [ONNX Runtime](https://github.com/microsoft/onnxruntime) shared library (`libonnxruntime.so`)
 - Root access for installation and enrollment
 
-ONNX Runtime must be installed and visible as `libonnxruntime.so` (in `/usr/lib` or `/usr/local/lib`). Install it via your distro's package manager or from the [official releases](https://github.com/microsoft/onnxruntime/releases):
-
-| Distro | Command |
-|---|---|
-| Arch Linux | `sudo pacman -S onnxruntime` |
-| Ubuntu/Debian | install the `.deb` from the [releases page](https://github.com/microsoft/onnxruntime/releases) |
-| Fedora | install the `.rpm` from the [releases page](https://github.com/microsoft/onnxruntime/releases) |
+Everything else (ONNX Runtime, face recognition models) is downloaded automatically by the install script.
 
 ---
 
@@ -49,7 +42,8 @@ The install script:
 - Installs `pam_facegate.so` to `/usr/lib/security/`
 - Creates `/etc/facegate/`, `/usr/share/facegate/models/`, `/var/lib/facegate/users/`
 - Installs the config, man page, and shell completions
-- Downloads face recognition models (~400 MB) unless `--skip-models` is passed
+- Downloads ONNX Runtime (~10 MB) if not already present — skip with `--skip-ort`
+- Downloads face recognition models (~400 MB) if not already present — skip with `--skip-models`
 
 ---
 
