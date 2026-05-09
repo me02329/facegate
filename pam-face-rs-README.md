@@ -29,7 +29,7 @@ PAM → pam_python.so → Python code → dlib/face_recognition → fragile buil
 with:
 
 ```text
-PAM → pam_face_rs.so → Rust helper → ONNX Runtime → face detection + embedding comparison
+PAM → pam_facegate.so → Rust helper → ONNX Runtime → face detection + embedding comparison
 ```
 
 ---
@@ -66,7 +66,7 @@ PAM → pam_face_rs.so → Rust helper → ONNX Runtime → face detection + emb
 Recommended use:
 
 ```text
-auth sufficient pam_face_rs.so
+auth sufficient pam_facegate.so
 auth include system-auth
 ```
 
@@ -116,9 +116,9 @@ Recommended architecture:
 ```text
 Facegate/
 ├── crates/
-│   ├── pam_face_rs/        # PAM module: pam_face_rs.so
-│   ├── face_rs_core/       # camera, detection, embedding, matching
-│   └── face_rs_cli/        # CLI: facegate
+│   ├── pam_facegate/        # PAM module: pam_facegate.so
+│   ├── facegate_core/       # camera, detection, embedding, matching
+│   └── facegate_cli/        # CLI: facegate
 ├── models/
 │   ├── scrfd_500m.onnx
 │   └── arcface_w600k_r50.onnx
@@ -136,7 +136,7 @@ Facegate/
 Runtime layout:
 
 ```text
-/usr/lib/security/pam_face_rs.so
+/usr/lib/security/pam_facegate.so
 /usr/bin/facegate
 /etc/facegate/config.toml
 /usr/share/facegate/models/scrfd_500m.onnx
@@ -148,7 +148,7 @@ Runtime layout:
 
 ## Components
 
-### `pam_face_rs`
+### `pam_facegate`
 
 Native PAM module.
 
@@ -165,10 +165,10 @@ The PAM module should stay small and auditable.
 Expected PAM line:
 
 ```text
-auth sufficient pam_face_rs.so
+auth sufficient pam_facegate.so
 ```
 
-### `face_rs_core`
+### `facegate_core`
 
 Core library.
 
@@ -183,7 +183,7 @@ Responsibilities:
 - compare embeddings;
 - apply matching policy.
 
-### `face_rs_cli`
+### `facegate_cli`
 
 Administration CLI.
 
@@ -208,7 +208,7 @@ sudo
   ↓
 PAM
   ↓
-pam_face_rs.so
+pam_facegate.so
   ↓
 /usr/bin/facegate auth --user <username>
   ↓
@@ -347,7 +347,7 @@ Recommended permissions:
 ```text
 /etc/facegate/config.toml                  root:root 0644
 /usr/bin/facegate                          root:root 0755
-/usr/lib/security/pam_face_rs.so          root:root 0755
+/usr/lib/security/pam_facegate.so          root:root 0755
 /usr/share/facegate/models/*.onnx          root:root 0644
 /var/lib/facegate                          root:root 0755
 /var/lib/facegate/users                    root:root 0755
@@ -465,13 +465,13 @@ sudo nano /etc/pam.d/sudo
 Add at the top:
 
 ```text
-auth sufficient pam_face_rs.so
+auth sufficient pam_facegate.so
 ```
 
 Example:
 
 ```text
-auth sufficient pam_face_rs.so
+auth sufficient pam_facegate.so
 #%PAM-1.0
 auth        include     system-auth
 account     include     system-auth
@@ -509,9 +509,9 @@ Recommended workspace:
 [workspace]
 resolver = "2"
 members = [
-  "crates/face_rs_core",
-  "crates/face_rs_cli",
-  "crates/pam_face_rs",
+  "crates/facegate_core",
+  "crates/facegate_cli",
+  "crates/pam_facegate",
 ]
 ```
 
@@ -595,9 +595,9 @@ cargo install cargo-nextest
 mkdir Facegate
 cd Facegate
 
-cargo new crates/face_rs_core --lib
-cargo new crates/face_rs_cli --bin
-cargo new crates/pam_face_rs --lib
+cargo new crates/facegate_core --lib
+cargo new crates/facegate_cli --bin
+cargo new crates/pam_facegate --lib
 ```
 
 Create root `Cargo.toml`:
@@ -607,16 +607,16 @@ cat > Cargo.toml <<'EOF2'
 [workspace]
 resolver = "2"
 members = [
-  "crates/face_rs_core",
-  "crates/face_rs_cli",
-  "crates/pam_face_rs",
+  "crates/facegate_core",
+  "crates/facegate_cli",
+  "crates/pam_facegate",
 ]
 EOF2
 ```
 
 ### PAM module crate type
 
-In `crates/pam_face_rs/Cargo.toml`, configure the library as a shared object:
+In `crates/pam_facegate/Cargo.toml`, configure the library as a shared object:
 
 ```toml
 [lib]
@@ -626,7 +626,7 @@ crate-type = ["cdylib"]
 The final build artifact should be renamed/installed as:
 
 ```text
-pam_face_rs.so
+pam_facegate.so
 ```
 
 ---
@@ -688,7 +688,7 @@ sudo install -Dm755 target/release/facegate /usr/bin/facegate
 Install PAM module:
 
 ```bash
-sudo install -Dm755 target/release/libpam_face_rs.so /usr/lib/security/pam_face_rs.so
+sudo install -Dm755 target/release/libpam_facegate.so /usr/lib/security/pam_facegate.so
 ```
 
 Create config directory:
@@ -727,7 +727,7 @@ Expected package contents:
 
 ```text
 /usr/bin/facegate
-/usr/lib/security/pam_face_rs.so
+/usr/lib/security/pam_facegate.so
 /etc/facegate/config.toml
 /usr/share/facegate/models/
 ```
@@ -739,7 +739,7 @@ Instead, post-install instructions should say:
 ```text
 To enable for sudo, add this line at the top of /etc/pam.d/sudo:
 
-auth sufficient pam_face_rs.so
+auth sufficient pam_facegate.so
 ```
 
 This avoids locking users out.
@@ -774,7 +774,7 @@ Before merging any PAM-related change:
 
 ### Phase 2: PAM module
 
-- `pam_face_rs.so`
+- `pam_facegate.so`
 - `facegate auth --user`
 - sudo integration
 - timeout handling
@@ -824,17 +824,17 @@ Create the workspace:
 mkdir Facegate
 cd Facegate
 
-cargo new crates/face_rs_core --lib
-cargo new crates/face_rs_cli --bin
-cargo new crates/pam_face_rs --lib
+cargo new crates/facegate_core --lib
+cargo new crates/facegate_cli --bin
+cargo new crates/pam_facegate --lib
 
 cat > Cargo.toml <<'EOF2'
 [workspace]
 resolver = "2"
 members = [
-  "crates/face_rs_core",
-  "crates/face_rs_cli",
-  "crates/pam_face_rs",
+  "crates/facegate_core",
+  "crates/facegate_cli",
+  "crates/pam_facegate",
 ]
 EOF2
 ```
@@ -842,7 +842,7 @@ EOF2
 Configure the PAM module crate:
 
 ```bash
-cat >> crates/pam_face_rs/Cargo.toml <<'EOF2'
+cat >> crates/pam_facegate/Cargo.toml <<'EOF2'
 
 [lib]
 crate-type = ["cdylib"]
@@ -864,7 +864,7 @@ Install locally later:
 cargo build --release
 
 sudo install -Dm755 target/release/facegate /usr/bin/facegate
-sudo install -Dm755 target/release/libpam_face_rs.so /usr/lib/security/pam_face_rs.so
+sudo install -Dm755 target/release/libpam_facegate.so /usr/lib/security/pam_facegate.so
 
 sudo mkdir -p /etc/facegate
 sudo mkdir -p /usr/share/facegate/models
@@ -876,7 +876,7 @@ sudo mkdir -p /var/lib/facegate/users
 ## Suggested initial Codex prompt
 
 ```text
-Build the MVP of Facegate following README.md. Start with the Rust workspace structure, config loading, CLI skeleton using clap, and a face_rs_core abstraction with stubbed camera/detection/matching interfaces. Do not implement PAM first. Prioritize testable modules, clean errors, and secure file layout.
+Build the MVP of Facegate following README.md. Start with the Rust workspace structure, config loading, CLI skeleton using clap, and a facegate_core abstraction with stubbed camera/detection/matching interfaces. Do not implement PAM first. Prioritize testable modules, clean errors, and secure file layout.
 ```
 
 ---

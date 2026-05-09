@@ -181,9 +181,8 @@ authentication when Facegate does not recognize a user.
 .I /usr/bin/facegate
 Facegate command line interface.
 .TP
-.I /usr/lib/security/pam_face_rs.so
-PAM module. The file name is kept for compatibility with existing PAM
-configuration.
+.I /usr/lib/security/pam_facegate.so
+PAM module.
 .TP
 .I /etc/facegate/config.toml
 Default configuration file.
@@ -239,12 +238,12 @@ facegate completions zsh
 .EE
 .SH PAM SETUP
 Facegate is intended to be used from PAM through
-.IR pam_face_rs.so .
+.IR pam_facegate.so .
 A typical PAM line is:
 .PP
 .RS
 .EX
-auth sufficient pam_face_rs.so
+auth      sufficient    pam_facegate.so
 .EE
 .RE
 .PP
