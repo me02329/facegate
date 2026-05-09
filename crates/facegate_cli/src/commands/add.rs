@@ -1,3 +1,4 @@
+use std::io::{self, BufRead, Write};
 use std::sync::mpsc::Sender;
 
 use anyhow::bail;
@@ -31,21 +32,55 @@ pub fn run_streaming(
 
     require_root()?;
 
-    out!("Enrolling face for '{username}' (label: '{label}')");
+    let samples = ask_sample_count()?;
+
+    out!("Enrolling face for '{username}' (label: '{label}', {samples} sample(s))");
     out!("Opening camera and loading models...");
     let mut pipeline = FacePipeline::new(config)?;
 
-    out!(
-        "Looking for face (timeout: {}ms)...",
-        config.camera.timeout_ms
-    );
-    let embedding = pipeline.capture_embedding(config)?;
-
-    out!("Face detected. Saving template...");
     let store = TemplateStore::new(&config.storage.base_dir);
-    let template = store.add_template(username, label, embedding)?;
 
-    out!("Done — template #{} saved for '{username}'.", template.id);
+    for i in 1..=samples {
+        out!("");
+        out!("Sample {i}/{samples} — look at the camera, then press Enter...");
+        wait_for_enter()?;
+        out!(
+            "Capturing (timeout: {}ms)...",
+            config.camera.timeout_ms
+        );
+        let embedding = pipeline.capture_embedding(config)?;
+        let sample_label = if samples == 1 {
+            label.to_owned()
+        } else {
+            format!("{label}-{i}")
+        };
+        let template = store.add_template(username, &sample_label, embedding)?;
+        out!("  ✓ template #{} saved (label: '{sample_label}')", template.id);
+    }
+
+    out!("");
+    out!("Done — {samples} template(s) enrolled for '{username}'.");
+    Ok(())
+}
+
+fn ask_sample_count() -> anyhow::Result<u32> {
+    print!("How many samples do you want to capture? [1-10, default 3]: ");
+    io::stdout().flush()?;
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line)?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(3);
+    }
+    match trimmed.parse::<u32>() {
+        Ok(n) if n >= 1 && n <= 10 => Ok(n),
+        _ => bail!("invalid number of samples '{trimmed}': expected 1-10"),
+    }
+}
+
+fn wait_for_enter() -> anyhow::Result<()> {
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line)?;
     Ok(())
 }
 
