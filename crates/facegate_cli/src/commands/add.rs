@@ -1,6 +1,5 @@
 use std::io::{self, BufRead, Write};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
 
 use anyhow::bail;
 use facegate_core::config::Config;
@@ -15,7 +14,7 @@ pub fn run(config: &Config, username: &str, label: Option<&str>) -> anyhow::Resu
     let label = label.map(|s| s.to_owned());
 
     let handle = std::thread::spawn(move || {
-        run_streaming(&config, Some(&username), label.as_deref(), samples, &tx)
+        run_streaming(&config, Some(&username), label.as_deref(), samples, true, &tx)
     });
 
     for line in rx {
@@ -26,11 +25,14 @@ pub fn run(config: &Config, username: &str, label: Option<&str>) -> anyhow::Resu
     Ok(())
 }
 
+/// `interactive`: if true, wait for Enter before each capture (CLI).
+///                if false, capture immediately (TUI).
 pub fn run_streaming(
     config: &Config,
     username: Option<&str>,
     label: Option<&str>,
     samples: u32,
+    interactive: bool,
     tx: &Sender<String>,
 ) -> anyhow::Result<()> {
     let username = username.unwrap_or("");
@@ -49,8 +51,10 @@ pub fn run_streaming(
 
     for i in 1..=samples {
         out!("");
-        out!("Sample {i}/{samples} — look at the camera, capturing in 3 seconds...");
-        std::thread::sleep(Duration::from_secs(3));
+        if interactive {
+            out!("Sample {i}/{samples} — position yourself in front of the camera, then press Enter...");
+            wait_for_enter()?;
+        }
         out!(
             "Capturing (timeout: {}ms)...",
             config.camera.timeout_ms
@@ -67,6 +71,12 @@ pub fn run_streaming(
 
     out!("");
     out!("Done — {samples} template(s) enrolled for '{username}'.");
+    Ok(())
+}
+
+fn wait_for_enter() -> anyhow::Result<()> {
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line)?;
     Ok(())
 }
 

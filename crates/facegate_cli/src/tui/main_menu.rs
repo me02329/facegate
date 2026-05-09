@@ -306,7 +306,7 @@ impl<'a> App<'a> {
                 }
                 Action::CameraTest => commands::camera_test::run_streaming(&config, None, &tx),
                 Action::Add => {
-                    commands::add::run_streaming(&config, username.as_deref(), None, samples, &tx)
+                    commands::add::run_streaming(&config, username.as_deref(), None, samples, false, &tx)
                 }
                 Action::List => commands::list::run_streaming(&config, username.as_deref(), &tx),
                 Action::Test => commands::test::run_streaming(&config, username.as_deref(), &tx),
