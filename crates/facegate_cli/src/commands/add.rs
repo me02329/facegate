@@ -7,7 +7,33 @@ use facegate_core::config::Config;
 use facegate_core::pipeline::FacePipeline;
 use facegate_core::storage::TemplateStore;
 
-pub fn run(config: &Config, username: &str, label: Option<&str>) -> anyhow::Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrollmentTarget {
+    Sudo,
+    Session,
+    Both,
+}
+
+impl EnrollmentTarget {
+    pub fn requires_sudo_user(self) -> bool {
+        matches!(self, EnrollmentTarget::Sudo | EnrollmentTarget::Both)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            EnrollmentTarget::Sudo => "sudo",
+            EnrollmentTarget::Session => "session",
+            EnrollmentTarget::Both => "sudo+session",
+        }
+    }
+}
+
+pub fn run(
+    config: &Config,
+    username: &str,
+    label: Option<&str>,
+    target: EnrollmentTarget,
+) -> anyhow::Result<()> {
     let samples = ask_sample_count()?;
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     let config = config.clone();
@@ -21,6 +47,7 @@ pub fn run(config: &Config, username: &str, label: Option<&str>) -> anyhow::Resu
             label.as_deref(),
             samples,
             true,
+            target,
             &tx,
         )
     });
@@ -43,6 +70,7 @@ pub fn run_streaming(
     label: Option<&str>,
     samples: u32,
     interactive: bool,
+    target: EnrollmentTarget,
     tx: &Sender<String>,
 ) -> anyhow::Result<()> {
     let username = username.unwrap_or("");
@@ -53,9 +81,14 @@ pub fn run_streaming(
 
     require_root()?;
     require_system_user(username)?;
-    require_sudo_user(username)?;
+    if target.requires_sudo_user() {
+        require_sudo_user(username)?;
+    }
 
-    out!("Enrolling face for '{username}' (label: '{label}', {samples} sample(s))");
+    out!(
+        "Enrolling {} face for '{username}' (label: '{label}', {samples} sample(s))",
+        target.label()
+    );
     let store = TemplateStore::new(&config.storage.base_dir);
 
     for i in 1..=samples {

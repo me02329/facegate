@@ -121,10 +121,11 @@ facegate [--config PATH] [COMMAND]
 | `configure` | Edit settings in a terminal UI |
 | `doctor` | Check installation status |
 | `camera-test [--device DEV]` | Test camera and face detection |
-| `add USERNAME [--label LABEL]` | Enroll face templates for a user |
+| `add USERNAME [--label LABEL] [--for sudo\|session\|both]` | Enroll face templates for a user |
 | `list USERNAME` | List enrolled templates |
 | `remove USERNAME ID` | Remove a template by ID |
 | `test USERNAME` | Live recognition test |
+| `session-auth` | Toggle face authentication for login/session PAM services |
 | `completions SHELL` | Print shell completion script |
 
 All commands except `completions` require root.
@@ -134,15 +135,20 @@ All commands except `completions` require root.
 ## Enrollment
 
 When enrolling, Facegate first verifies that the target name is a real Unix
-user and that the user has sudo privileges. It then asks how many samples to
-capture (1–10, default 3). Each sample is saved as a separate template, which
-improves recognition across varying poses and lighting conditions.
+user. By default, enrollment targets sudo authentication and also verifies that
+the user has sudo privileges. For login/session authentication, use
+`--for session`. To enroll once for both sudo and session authentication, use
+`--for both`.
+
+Facegate then asks how many samples to capture (1–10, default 3). Each sample
+is saved as a separate template, which improves recognition across varying poses
+and lighting conditions.
 
 ```
-$ sudo facegate add mart
+$ sudo facegate add mart --for both
 How many samples do you want to capture? [1-10, default 3]: 3
 
-Enrolling face for 'mart' (label: 'mart', 3 sample(s))
+Enrolling sudo+session face for 'mart' (label: 'mart', 3 sample(s))
 Opening camera and loading models...
 
 Sample 1/3 — look at the camera, then press Enter...
@@ -161,6 +167,11 @@ Done — 3 template(s) enrolled for 'mart'.
 ### Enable via the TUI (recommended)
 
 Run `sudo facegate` and select **Sudo Auth** to toggle face authentication for `sudo` on/off. The menu shows the current state and updates immediately.
+
+Run `sudo facegate session-auth` or select **Session Auth** in the TUI to toggle
+Facegate for supported login/session PAM services found on the system, such as
+`login`, `gdm-password`, `sddm`, `lightdm`, `greetd`, or `kde`. Session auth can
+be used by non-sudo local users enrolled with `facegate add USER --for session`.
 
 ### Manual setup
 

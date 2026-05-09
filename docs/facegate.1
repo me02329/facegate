@@ -24,6 +24,11 @@ facegate \- facial authentication helper and diagnostics tool for Linux
 .RI [ --config " PATH" ]
 .I USERNAME
 .RI [ --label " LABEL" ]
+.RI [ --for " sudo|session|both" ]
+.YS
+.SY facegate
+.B session-auth
+.RI [ --config " PATH" ]
 .YS
 .SY facegate
 .B list
@@ -88,12 +93,33 @@ Override the configured camera device for this test only, for example
 .IR /dev/video2 .
 .RE
 .TP
-.B add \fIUSERNAME\fR [\fB--label\fR \fILABEL\fR]
+.B add \fIUSERNAME\fR [\fB--label\fR \fILABEL\fR] [\fB--for\fR \fIsudo|session|both\fR]
 Enroll a face template for
 .IR USERNAME .
 This command usually requires root because templates are stored under
 .IR /var/lib/facegate/users .
 The optional label is stored with the template to help identify captures later.
+The default target is
+.BR sudo ,
+which requires
+.I USERNAME
+to have sudo privileges.
+Use
+.B --for session
+for login/session authentication of non-sudo local users, or
+.B --for both
+to enroll a sudo-capable user for both flows.
+.TP
+.B session-auth
+Toggle Facegate in supported login/session PAM service files found on the
+system, such as
+.BR login ,
+.BR gdm-password ,
+.BR sddm ,
+.BR lightdm ,
+.BR greetd ,
+or
+.BR kde .
 .TP
 .B list \fIUSERNAME\fR
 List enrolled templates for
@@ -219,7 +245,7 @@ sudo facegate camera-test --device /dev/video2
 .TP
 Enroll the current user:
 .EX
-sudo facegate add "$USER" --label normal
+sudo facegate add "$USER" --for both --label normal
 .EE
 .TP
 List enrolled templates:

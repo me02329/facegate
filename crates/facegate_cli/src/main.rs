@@ -1,7 +1,7 @@
 mod commands;
 mod tui;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
 use facegate_core::config::{Config, DEFAULT_CONFIG_PATH};
 use tracing_subscriber::EnvFilter;
@@ -35,7 +35,11 @@ enum Command {
         username: String,
         #[arg(long)]
         label: Option<String>,
+        #[arg(long = "for", value_enum, default_value_t = EnrollmentPurpose::Sudo)]
+        purpose: EnrollmentPurpose,
     },
+    /// Toggle face authentication for login/session PAM services
+    SessionAuth,
     /// List enrolled templates for a user
     List { username: String },
     /// Remove an enrolled template (requires root)
@@ -53,6 +57,23 @@ enum Command {
         #[arg(value_enum)]
         shell: Shell,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum EnrollmentPurpose {
+    Sudo,
+    Session,
+    Both,
+}
+
+impl From<EnrollmentPurpose> for commands::add::EnrollmentTarget {
+    fn from(value: EnrollmentPurpose) -> Self {
+        match value {
+            EnrollmentPurpose::Sudo => commands::add::EnrollmentTarget::Sudo,
+            EnrollmentPurpose::Session => commands::add::EnrollmentTarget::Session,
+            EnrollmentPurpose::Both => commands::add::EnrollmentTarget::Both,
+        }
+    }
 }
 
 fn main() {
@@ -179,9 +200,12 @@ fn run_command(
         Command::Configure => commands::configure::run(config, config_path),
         Command::Doctor => commands::doctor::run(&config),
         Command::CameraTest { device } => commands::camera_test::run(&config, device.as_deref()),
-        Command::Add { username, label } => {
-            commands::add::run(&config, &username, label.as_deref())
-        }
+        Command::Add {
+            username,
+            label,
+            purpose,
+        } => commands::add::run(&config, &username, label.as_deref(), purpose.into()),
+        Command::SessionAuth => commands::session_toggle::run(),
         Command::List { username } => commands::list::run(&config, &username),
         Command::Remove { username, id } => commands::remove::run(&config, &username, id),
         Command::Test { username } => commands::test::run(&config, &username),

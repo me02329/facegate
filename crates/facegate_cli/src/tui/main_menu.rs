@@ -54,8 +54,11 @@ enum Action {
     Configure,
     Doctor,
     SudoToggle,
+    SessionToggle,
     CameraTest,
-    Add,
+    AddSudo,
+    AddSession,
+    AddBoth,
     List,
     Test,
 }
@@ -68,11 +71,16 @@ struct MenuItem {
     needs_user: bool,
 }
 
-fn build_items(sudo_enabled: bool) -> Vec<MenuItem> {
+fn build_items(sudo_enabled: bool, session_enabled: bool) -> Vec<MenuItem> {
     let sudo_desc = if sudo_enabled {
         "Disable sudo face authentication  (root)"
     } else {
         "Enable sudo face authentication   (root)"
+    };
+    let session_desc = if session_enabled {
+        "Disable login/session face auth"
+    } else {
+        "Enable login/session face auth"
     };
     vec![
         MenuItem {
@@ -97,6 +105,13 @@ fn build_items(sudo_enabled: bool) -> Vec<MenuItem> {
             needs_user: false,
         },
         MenuItem {
+            icon: "▣ ",
+            label: "Session Auth",
+            description: session_desc.into(),
+            action: Some(Action::SessionToggle),
+            needs_user: false,
+        },
+        MenuItem {
             icon: "◉ ",
             label: "Camera Test",
             description: "Test camera and face detection".into(),
@@ -105,9 +120,23 @@ fn build_items(sudo_enabled: bool) -> Vec<MenuItem> {
         },
         MenuItem {
             icon: "+ ",
-            label: "Enroll Face",
-            description: "Add a new face template  (root)".into(),
-            action: Some(Action::Add),
+            label: "Enroll Sudo",
+            description: "Enroll a sudo-capable user".into(),
+            action: Some(Action::AddSudo),
+            needs_user: true,
+        },
+        MenuItem {
+            icon: "+ ",
+            label: "Enroll Session",
+            description: "Enroll any local user".into(),
+            action: Some(Action::AddSession),
+            needs_user: true,
+        },
+        MenuItem {
+            icon: "+ ",
+            label: "Enroll Both",
+            description: "Enroll for sudo and session".into(),
+            action: Some(Action::AddBoth),
             needs_user: true,
         },
         MenuItem {
@@ -178,6 +207,7 @@ struct App<'a> {
     pending_username: Option<String>,
     panel: PanelState,
     sudo_enabled: bool,
+    session_enabled: bool,
     /// When set, the loop exits and main re-opens the config TUI.
     open_config: bool,
     should_quit: bool,
@@ -186,9 +216,10 @@ struct App<'a> {
 impl<'a> App<'a> {
     fn new(config: &'a Config) -> Self {
         let sudo_enabled = commands::sudo_toggle::is_enabled();
+        let session_enabled = commands::session_toggle::is_enabled();
         App {
             config,
-            items: build_items(sudo_enabled),
+            items: build_items(sudo_enabled, session_enabled),
             selected: 0,
             input_mode: InputMode::Menu,
             username_buf: String::new(),
@@ -197,6 +228,7 @@ impl<'a> App<'a> {
             pending_username: None,
             panel: PanelState::Idle,
             sudo_enabled,
+            session_enabled,
             open_config: false,
             should_quit: false,
         }
@@ -256,7 +288,10 @@ impl<'a> App<'a> {
             return;
         }
         if let Some(action) = self.pending.clone() {
-            if action == Action::Add {
+            if matches!(
+                action,
+                Action::AddSudo | Action::AddSession | Action::AddBoth
+            ) {
                 self.pending_username = Some(name);
                 self.sample_count_buf = "3".to_owned();
                 self.input_mode = InputMode::SampleCountInput;
@@ -303,13 +338,35 @@ impl<'a> App<'a> {
                 Action::SudoToggle => {
                     commands::sudo_toggle::run_streaming(username.as_deref(), &tx)
                 }
+                Action::SessionToggle => {
+                    commands::session_toggle::run_streaming(username.as_deref(), &tx)
+                }
                 Action::CameraTest => commands::camera_test::run_streaming(&config, None, &tx),
-                Action::Add => commands::add::run_streaming(
+                Action::AddSudo => commands::add::run_streaming(
                     &config,
                     username.as_deref(),
                     None,
                     samples,
                     false,
+                    commands::add::EnrollmentTarget::Sudo,
+                    &tx,
+                ),
+                Action::AddSession => commands::add::run_streaming(
+                    &config,
+                    username.as_deref(),
+                    None,
+                    samples,
+                    false,
+                    commands::add::EnrollmentTarget::Session,
+                    &tx,
+                ),
+                Action::AddBoth => commands::add::run_streaming(
+                    &config,
+                    username.as_deref(),
+                    None,
+                    samples,
+                    false,
+                    commands::add::EnrollmentTarget::Both,
                     &tx,
                 ),
                 Action::List => commands::list::run_streaming(&config, username.as_deref(), &tx),
@@ -363,7 +420,8 @@ impl<'a> App<'a> {
     fn back_to_menu(&mut self) {
         if matches!(self.panel, PanelState::Done { .. }) {
             self.sudo_enabled = commands::sudo_toggle::is_enabled();
-            self.items = build_items(self.sudo_enabled);
+            self.session_enabled = commands::session_toggle::is_enabled();
+            self.items = build_items(self.sudo_enabled, self.session_enabled);
             self.panel = PanelState::Idle;
         }
     }

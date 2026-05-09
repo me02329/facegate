@@ -4,6 +4,8 @@ pub mod camera_test;
 pub mod configure;
 pub mod doctor;
 pub mod list;
+pub mod pam_edit;
 pub mod remove;
+pub mod session_toggle;
 pub mod sudo_toggle;
 pub mod test;
