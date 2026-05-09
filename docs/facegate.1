@@ -1,0 +1,273 @@
+.TH FACEGATE 1 "May 2026" "Facegate 0.1.0" "User Commands"
+.SH NAME
+facegate \- facial authentication helper and diagnostics tool for Linux
+.SH SYNOPSIS
+.SY facegate
+.RI [ --config " PATH" ]
+.RI [ COMMAND ]
+.YS
+.SY facegate
+.B configure
+.RI [ --config " PATH" ]
+.YS
+.SY facegate
+.B doctor
+.RI [ --config " PATH" ]
+.YS
+.SY facegate
+.B camera-test
+.RI [ --config " PATH" ]
+.RI [ --device " DEVICE" ]
+.YS
+.SY facegate
+.B add
+.RI [ --config " PATH" ]
+.I USERNAME
+.RI [ --label " LABEL" ]
+.YS
+.SY facegate
+.B list
+.RI [ --config " PATH" ]
+.I USERNAME
+.YS
+.SY facegate
+.B remove
+.RI [ --config " PATH" ]
+.I USERNAME
+.I ID
+.YS
+.SY facegate
+.B test
+.RI [ --config " PATH" ]
+.I USERNAME
+.YS
+.SY facegate
+.B completions
+.I SHELL
+.YS
+.SH DESCRIPTION
+.B facegate
+is the command line and interactive terminal interface for Facegate, a native
+Linux facial authentication stack backed by V4L2 cameras, ONNX Runtime face
+detection, ArcFace-compatible embeddings, and a PAM module.
+.PP
+Running
+.B facegate
+without a command opens the interactive menu. The menu exposes configuration,
+installation diagnostics, camera testing, enrollment, template listing, and
+live recognition testing.
+.PP
+The default configuration file is
+.IR /etc/facegate/config.toml .
+Most commands read this file unless
+.B --config
+is supplied.
+.SH COMMANDS
+.TP
+.B configure
+Open the interactive terminal configuration editor. Use this to adjust camera
+settings, recognition thresholds, model paths, storage paths, logging, and PAM
+fallback behavior. In the editor,
+.B Esc
+returns to the previous screen and
+.B q
+quits.
+.TP
+.B doctor
+Run installation diagnostics. This checks that the configuration file, PAM
+module, storage directory, camera device, ONNX models, and ONNX Runtime shared
+library are present.
+.TP
+.B camera-test
+Open the configured camera, negotiate a supported pixel format, capture one
+frame, load the detector model, and report whether a face was detected.
+.RS
+.TP
+.BI --device " DEVICE"
+Override the configured camera device for this test only, for example
+.IR /dev/video2 .
+.RE
+.TP
+.B add \fIUSERNAME\fR [\fB--label\fR \fILABEL\fR]
+Enroll a face template for
+.IR USERNAME .
+This command usually requires root because templates are stored under
+.IR /var/lib/facegate/users .
+The optional label is stored with the template to help identify captures later.
+.TP
+.B list \fIUSERNAME\fR
+List enrolled templates for
+.IR USERNAME ,
+including template IDs and labels.
+.TP
+.B remove \fIUSERNAME\fR \fIID\fR
+Remove one enrolled template by ID. This command usually requires root.
+.TP
+.B test \fIUSERNAME\fR
+Capture a live face embedding and compare it against enrolled templates for
+.IR USERNAME .
+The command prints the best cosine similarity, the configured threshold, and
+the final ACCEPT or REJECT result.
+.TP
+.B completions \fISHELL\fR
+Print shell completion scripts. Supported shells are the values accepted by
+Clap, typically
+.BR bash ,
+.BR zsh ,
+.BR fish ,
+.BR elvish ,
+and
+.BR powershell .
+.TP
+.B auth --user \fIUSERNAME\fR
+Internal command used by the PAM module. It is hidden from the normal help
+output and returns machine-readable exit codes. Users should normally run
+.B test
+instead.
+.SH OPTIONS
+.TP
+.BI --config " PATH"
+Read configuration from
+.I PATH
+instead of
+.IR /etc/facegate/config.toml .
+.TP
+.B -h, --help
+Show command help.
+.TP
+.B -V, --version
+Show the Facegate version.
+.SH CONFIGURATION
+The configuration file is TOML. The default path is:
+.PP
+.RS
+.I /etc/facegate/config.toml
+.RE
+.PP
+Important sections include:
+.TP
+.B [camera]
+Camera device and capture settings. Common fields are
+.BR device ,
+.BR width ,
+.BR height ,
+.BR fps ,
+.BR warmup_frames ,
+and
+.BR timeout_ms .
+.TP
+.B [recognition]
+Recognition policy. Important fields are
+.BR threshold ,
+.BR required_matches ,
+.BR max_attempts ,
+and
+.BR min_face_size .
+Higher thresholds reduce false accepts but may increase false rejects.
+.TP
+.B [models]
+Paths to the ONNX detector and embedder models. Defaults are under
+.IR /usr/share/facegate/models .
+.TP
+.B [storage]
+Template storage location. The default is
+.IR /var/lib/facegate/users .
+.TP
+.B [security]
+Authentication behavior, including whether PAM may fall back to password
+authentication when Facegate does not recognize a user.
+.SH FILES
+.TP
+.I /usr/bin/facegate
+Facegate command line interface.
+.TP
+.I /usr/lib/security/pam_face_rs.so
+PAM module. The file name is kept for compatibility with existing PAM
+configuration.
+.TP
+.I /etc/facegate/config.toml
+Default configuration file.
+.TP
+.I /usr/share/facegate/models/scrfd_500m.onnx
+Default face detector model.
+.TP
+.I /usr/share/facegate/models/arcface_w600k_r50.onnx
+Default face embedding model.
+.TP
+.I /var/lib/facegate/users/USERNAME/embeddings.json
+Stored templates for a user.
+.SH EXAMPLES
+.TP
+Open the interactive menu:
+.EX
+facegate
+.EE
+.TP
+Check the installation:
+.EX
+sudo facegate doctor
+.EE
+.TP
+Test the configured camera:
+.EX
+sudo facegate camera-test
+.EE
+.TP
+Test another camera device:
+.EX
+sudo facegate camera-test --device /dev/video2
+.EE
+.TP
+Enroll the current user:
+.EX
+sudo facegate add "$USER" --label normal
+.EE
+.TP
+List enrolled templates:
+.EX
+sudo facegate list "$USER"
+.EE
+.TP
+Run a live recognition test:
+.EX
+sudo facegate test "$USER"
+.EE
+.TP
+Generate zsh completions:
+.EX
+facegate completions zsh
+.EE
+.SH PAM SETUP
+Facegate is intended to be used from PAM through
+.IR pam_face_rs.so .
+A typical PAM line is:
+.PP
+.RS
+.EX
+auth sufficient pam_face_rs.so
+.EE
+.RE
+.PP
+Always keep a root shell open while editing PAM configuration. A broken PAM
+configuration can lock you out of
+.BR sudo ,
+login, or screen unlock flows.
+.SH SECURITY NOTES
+Facegate is a convenience authentication mechanism. It should not be treated as
+equivalent to hardware-backed authentication, FIDO2, smartcards, or a strong
+password. Camera-based recognition can be affected by lighting, pose, camera
+quality, model behavior, and presentation attacks.
+.PP
+For safer deployments, keep password fallback enabled while testing, enroll
+multiple templates under realistic lighting conditions, use conservative
+thresholds, and ensure template files remain writable only by root.
+.SH EXIT STATUS
+.B facegate
+returns zero on successful user-facing commands and non-zero on errors.
+The hidden
+.B auth
+command uses fixed exit codes consumed by the PAM module.
+.SH SEE ALSO
+.BR pam (8),
+.BR sudo (8),
+.BR v4l2-ctl (1)

@@ -1,6 +1,6 @@
-# pam-face-rs
+# Facegate
 
-`pam-face-rs` is a native Rust facial authentication stack for Linux, designed as a modern, safer and maintainable alternative to legacy PAM facial authentication tools based on Python, `pam-python`, Python 2, and fragile native bindings.
+`Facegate` is a native Rust facial authentication stack for Linux, designed as a modern, safer and maintainable alternative to legacy PAM facial authentication tools based on Python, `pam-python`, Python 2, and fragile native bindings.
 
 The project provides:
 
@@ -61,7 +61,7 @@ PAM → pam_face_rs.so → Rust helper → ONNX Runtime → face detection + emb
 
 ## Security model
 
-`pam-face-rs` is intended as a **convenience authentication mechanism**, not as a replacement for strong authentication.
+`Facegate` is intended as a **convenience authentication mechanism**, not as a replacement for strong authentication.
 
 Recommended use:
 
@@ -91,7 +91,7 @@ The project should assume:
 
 ### Security limitations
 
-`pam-face-rs` does **not** claim to provide:
+`Facegate` does **not** claim to provide:
 
 - Windows Hello security guarantees;
 - hardware-backed liveness detection;
@@ -114,14 +114,14 @@ For high-security operations, prefer:
 Recommended architecture:
 
 ```text
-pam-face-rs/
+Facegate/
 ├── crates/
 │   ├── pam_face_rs/        # PAM module: pam_face_rs.so
 │   ├── face_rs_core/       # camera, detection, embedding, matching
-│   └── face_rs_cli/        # CLI: face-rs
+│   └── face_rs_cli/        # CLI: facegate
 ├── models/
 │   ├── scrfd_500m.onnx
-│   └── arcface.onnx
+│   └── arcface_w600k_r50.onnx
 ├── packaging/
 │   └── arch/
 │       └── PKGBUILD
@@ -137,11 +137,11 @@ Runtime layout:
 
 ```text
 /usr/lib/security/pam_face_rs.so
-/usr/bin/face-rs
-/etc/face-rs/config.toml
-/usr/share/face-rs/models/scrfd_500m.onnx
-/usr/share/face-rs/models/arcface.onnx
-/var/lib/face-rs/users/<username>/embeddings.json
+/usr/bin/facegate
+/etc/facegate/config.toml
+/usr/share/facegate/models/scrfd_500m.onnx
+/usr/share/facegate/models/arcface_w600k_r50.onnx
+/var/lib/facegate/users/<username>/embeddings.json
 ```
 
 ---
@@ -190,13 +190,13 @@ Administration CLI.
 Expected commands:
 
 ```bash
-face-rs doctor
-face-rs camera-test
-face-rs add
-face-rs test
-face-rs list
-face-rs remove
-face-rs auth
+facegate doctor
+facegate camera-test
+facegate add
+facegate test
+facegate list
+facegate remove
+facegate auth
 ```
 
 ---
@@ -210,7 +210,7 @@ PAM
   ↓
 pam_face_rs.so
   ↓
-/usr/bin/face-rs auth --user <username>
+/usr/bin/facegate auth --user <username>
   ↓
 open configured camera
   ↓
@@ -300,7 +300,7 @@ The correct value depends on model, camera, lighting and enrollment quality.
 Default config path:
 
 ```text
-/etc/face-rs/config.toml
+/etc/facegate/config.toml
 ```
 
 Example:
@@ -321,11 +321,11 @@ max_attempts = 3
 min_face_size = 80
 
 [models]
-detector = "/usr/share/face-rs/models/scrfd_500m.onnx"
-embedder = "/usr/share/face-rs/models/arcface.onnx"
+detector = "/usr/share/facegate/models/scrfd_500m.onnx"
+embedder = "/usr/share/facegate/models/arcface_w600k_r50.onnx"
 
 [storage]
-base_dir = "/var/lib/face-rs/users"
+base_dir = "/var/lib/facegate/users"
 
 [logging]
 level = "info"
@@ -345,17 +345,17 @@ Biometric templates must not be readable by regular users.
 Recommended permissions:
 
 ```text
-/etc/face-rs/config.toml                  root:root 0644
-/usr/bin/face-rs                          root:root 0755
+/etc/facegate/config.toml                  root:root 0644
+/usr/bin/facegate                          root:root 0755
 /usr/lib/security/pam_face_rs.so          root:root 0755
-/usr/share/face-rs/models/*.onnx          root:root 0644
-/var/lib/face-rs                          root:root 0755
-/var/lib/face-rs/users                    root:root 0755
-/var/lib/face-rs/users/<username>         root:root 0700
-/var/lib/face-rs/users/<username>/*.json  root:root 0600
+/usr/share/facegate/models/*.onnx          root:root 0644
+/var/lib/facegate                          root:root 0755
+/var/lib/facegate/users                    root:root 0755
+/var/lib/facegate/users/<username>         root:root 0700
+/var/lib/facegate/users/<username>/*.json  root:root 0600
 ```
 
-The enrollment command should require root privileges because it writes into `/var/lib/face-rs`.
+The enrollment command should require root privileges because it writes into `/var/lib/facegate`.
 
 ---
 
@@ -364,7 +364,7 @@ The enrollment command should require root privileges because it writes into `/v
 ### Diagnostics
 
 ```bash
-face-rs doctor
+facegate doctor
 ```
 
 Expected checks:
@@ -385,7 +385,7 @@ Expected checks:
 ### Camera test
 
 ```bash
-face-rs camera-test --device /dev/video2
+facegate camera-test --device /dev/video2
 ```
 
 Should show or capture diagnostic frames and report:
@@ -401,9 +401,9 @@ face detected: YES/NO
 ### Enrollment
 
 ```bash
-sudo face-rs add mart --label mart-normal
-sudo face-rs add mart --label mart-glasses
-sudo face-rs add mart --label mart-low-light
+sudo facegate add mart --label mart-normal
+sudo facegate add mart --label mart-glasses
+sudo facegate add mart --label mart-low-light
 ```
 
 Enrollment should store one or more embeddings per label.
@@ -411,7 +411,7 @@ Enrollment should store one or more embeddings per label.
 ### Listing models
 
 ```bash
-sudo face-rs list mart
+sudo facegate list mart
 ```
 
 Example output:
@@ -428,7 +428,7 @@ ID  Created              Label
 ### Testing
 
 ```bash
-sudo face-rs test mart
+sudo facegate test mart
 ```
 
 Should perform live capture and report best match:
@@ -444,7 +444,7 @@ Result: ACCEPT
 ### PAM authentication helper
 
 ```bash
-/usr/bin/face-rs auth --user mart
+/usr/bin/facegate auth --user mart
 ```
 
 This command should be non-interactive and return only exit codes suitable for PAM.
@@ -592,8 +592,8 @@ cargo install cargo-nextest
 ### Create the project
 
 ```bash
-mkdir pam-face-rs
-cd pam-face-rs
+mkdir Facegate
+cd Facegate
 
 cargo new crates/face_rs_core --lib
 cargo new crates/face_rs_cli --bin
@@ -682,7 +682,7 @@ cargo build --release
 Install CLI:
 
 ```bash
-sudo install -Dm755 target/release/face-rs /usr/bin/face-rs
+sudo install -Dm755 target/release/facegate /usr/bin/facegate
 ```
 
 Install PAM module:
@@ -694,23 +694,23 @@ sudo install -Dm755 target/release/libpam_face_rs.so /usr/lib/security/pam_face_
 Create config directory:
 
 ```bash
-sudo mkdir -p /etc/face-rs
-sudo mkdir -p /usr/share/face-rs/models
-sudo mkdir -p /var/lib/face-rs/users
+sudo mkdir -p /etc/facegate
+sudo mkdir -p /usr/share/facegate/models
+sudo mkdir -p /var/lib/facegate/users
 ```
 
 Install example config:
 
 ```bash
-sudo install -Dm644 config.example.toml /etc/face-rs/config.toml
+sudo install -Dm644 config.example.toml /etc/facegate/config.toml
 ```
 
 Fix permissions:
 
 ```bash
-sudo chown -R root:root /etc/face-rs /usr/share/face-rs /var/lib/face-rs
-sudo chmod 755 /var/lib/face-rs
-sudo chmod 755 /var/lib/face-rs/users
+sudo chown -R root:root /etc/facegate /usr/share/facegate /var/lib/facegate
+sudo chmod 755 /var/lib/facegate
+sudo chmod 755 /var/lib/facegate/users
 ```
 
 ---
@@ -720,16 +720,16 @@ sudo chmod 755 /var/lib/face-rs/users
 Initial AUR package name:
 
 ```text
-pam-face-rs-git
+Facegate-git
 ```
 
 Expected package contents:
 
 ```text
-/usr/bin/face-rs
+/usr/bin/facegate
 /usr/lib/security/pam_face_rs.so
-/etc/face-rs/config.toml
-/usr/share/face-rs/models/
+/etc/facegate/config.toml
+/usr/share/facegate/models/
 ```
 
 The package should **not** automatically modify PAM files.
@@ -766,16 +766,16 @@ Before merging any PAM-related change:
 
 ### Phase 1: MVP CLI
 
-- `face-rs camera-test`
-- `face-rs add`
-- `face-rs list`
-- `face-rs test`
+- `facegate camera-test`
+- `facegate add`
+- `facegate list`
+- `facegate test`
 - local embedding storage
 
 ### Phase 2: PAM module
 
 - `pam_face_rs.so`
-- `face-rs auth --user`
+- `facegate auth --user`
 - sudo integration
 - timeout handling
 - logging
@@ -821,8 +821,8 @@ cargo install cargo-watch cargo-audit cargo-deny cargo-nextest
 Create the workspace:
 
 ```bash
-mkdir pam-face-rs
-cd pam-face-rs
+mkdir Facegate
+cd Facegate
 
 cargo new crates/face_rs_core --lib
 cargo new crates/face_rs_cli --bin
@@ -863,12 +863,12 @@ Install locally later:
 ```bash
 cargo build --release
 
-sudo install -Dm755 target/release/face-rs /usr/bin/face-rs
+sudo install -Dm755 target/release/facegate /usr/bin/facegate
 sudo install -Dm755 target/release/libpam_face_rs.so /usr/lib/security/pam_face_rs.so
 
-sudo mkdir -p /etc/face-rs
-sudo mkdir -p /usr/share/face-rs/models
-sudo mkdir -p /var/lib/face-rs/users
+sudo mkdir -p /etc/facegate
+sudo mkdir -p /usr/share/facegate/models
+sudo mkdir -p /var/lib/facegate/users
 ```
 
 ---
@@ -876,14 +876,14 @@ sudo mkdir -p /var/lib/face-rs/users
 ## Suggested initial Codex prompt
 
 ```text
-Build the MVP of pam-face-rs following README.md. Start with the Rust workspace structure, config loading, CLI skeleton using clap, and a face_rs_core abstraction with stubbed camera/detection/matching interfaces. Do not implement PAM first. Prioritize testable modules, clean errors, and secure file layout.
+Build the MVP of Facegate following README.md. Start with the Rust workspace structure, config loading, CLI skeleton using clap, and a face_rs_core abstraction with stubbed camera/detection/matching interfaces. Do not implement PAM first. Prioritize testable modules, clean errors, and secure file layout.
 ```
 
 ---
 
 ## Disclaimer
 
-`pam-face-rs` is a convenience authentication mechanism. It should not be treated as equivalent to Windows Hello, FIDO2, smartcards, or hardware-backed authentication systems.
+`Facegate` is a convenience authentication mechanism. It should not be treated as equivalent to Windows Hello, FIDO2, smartcards, or hardware-backed authentication systems.
 
 Use password fallback.  
 Do not deploy as the only authentication factor on sensitive systems.  

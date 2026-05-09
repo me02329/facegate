@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/face_rs_core",
-    "crates/face_rs_cli",
-    "crates/pam_face_rs",
+    "crates/facegate_core",
+    "crates/facegate_cli",
+    "crates/pam_facegate",
 ]
 
 [workspace.dependencies]

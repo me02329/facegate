@@ -16,7 +16,7 @@ download_models() {
 
   local url="https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
   local tmp_zip
-  tmp_zip="$(mktemp /tmp/face-rs-models-XXXXXX.zip)"
+  tmp_zip="$(mktemp /tmp/facegate-models-XXXXXX.zip)"
 
   echo "    Source : $url"
   echo "    Size   : ~400 MB"
@@ -60,7 +60,7 @@ download_models() {
     echo "         Files in $models_dir:" >&2
     ls "$models_dir" >&2 || true
     echo ""
-    echo "         Update [models] in /etc/face-rs/config.toml to match." >&2
+    echo "         Update [models] in /etc/facegate/config.toml to match." >&2
   fi
 }
 
@@ -86,43 +86,57 @@ fi
 # ── Install step (root required) ─────────────────────────────────────────────
 cd "$SCRIPT_DIR"
 
-if [[ ! -f target/release/face-rs ]]; then
-  echo "Error: target/release/face-rs not found." >&2
+if [[ ! -f target/release/facegate ]]; then
+  echo "Error: target/release/facegate not found." >&2
   echo "       Run 'cargo build --release' first (as your normal user)." >&2
   exit 1
 fi
 
 echo "==> Installing CLI..."
-install -Dm755 target/release/face-rs           /usr/bin/face-rs
+install -Dm755 target/release/facegate          /usr/bin/facegate
 
 echo "==> Installing PAM module..."
-install -Dm755 target/release/libpam_face_rs.so /usr/lib/security/pam_face_rs.so
+install -Dm755 target/release/libpam_facegate.so /usr/lib/security/pam_facegate.so
 
 echo "==> Creating directories..."
-mkdir -p /etc/face-rs
-mkdir -p /usr/share/face-rs/models
-mkdir -p /var/lib/face-rs/users
+mkdir -p /etc/facegate
+mkdir -p /usr/share/facegate/models
+mkdir -p /var/lib/facegate/users
 
 echo "==> Installing config..."
-if [[ ! -f /etc/face-rs/config.toml ]]; then
-  install -Dm644 config.example.toml /etc/face-rs/config.toml
-  echo "    Installed /etc/face-rs/config.toml (edit to set your camera device)"
+if [[ ! -f /etc/facegate/config.toml && -f /etc/face-rs/config.toml ]]; then
+  install -Dm644 /etc/face-rs/config.toml /etc/facegate/config.toml
+  sed -i 's#/usr/share/face-rs#/usr/share/facegate#g; s#/var/lib/face-rs#/var/lib/facegate#g' /etc/facegate/config.toml
+  echo "    Migrated /etc/face-rs/config.toml to /etc/facegate/config.toml"
+elif [[ ! -f /etc/facegate/config.toml ]]; then
+  install -Dm644 config.example.toml /etc/facegate/config.toml
+  echo "    Installed /etc/facegate/config.toml (edit to set your camera device)"
 else
-  echo "    /etc/face-rs/config.toml already exists, skipping."
+  echo "    /etc/facegate/config.toml already exists, skipping."
 fi
 
 echo "==> Installing shell completions..."
 mkdir -p /usr/share/zsh/site-functions
-/usr/bin/face-rs completions zsh  > /usr/share/zsh/site-functions/_face-rs
+/usr/bin/facegate completions zsh  > /usr/share/zsh/site-functions/_facegate
 mkdir -p /usr/share/bash-completion/completions
-/usr/bin/face-rs completions bash > /usr/share/bash-completion/completions/face-rs
+/usr/bin/facegate completions bash > /usr/share/bash-completion/completions/facegate
 mkdir -p /usr/share/fish/vendor_completions.d
-/usr/bin/face-rs completions fish > /usr/share/fish/vendor_completions.d/face-rs.fish
+/usr/bin/facegate completions fish > /usr/share/fish/vendor_completions.d/facegate.fish
+
+echo "==> Installing man page..."
+install -Dm644 docs/facegate.1 /usr/share/man/man1/facegate.1
 
 # ── Models ────────────────────────────────────────────────────────────────────
-MODELS_DIR="/usr/share/face-rs/models"
+MODELS_DIR="/usr/share/facegate/models"
 DETECTOR="$MODELS_DIR/scrfd_500m.onnx"
 EMBEDDER="$MODELS_DIR/arcface_w600k_r50.onnx"
+
+if [[ ! -f "$DETECTOR" && -f /usr/share/face-rs/models/scrfd_500m.onnx ]]; then
+  install -Dm644 /usr/share/face-rs/models/scrfd_500m.onnx "$DETECTOR"
+fi
+if [[ ! -f "$EMBEDDER" && -f /usr/share/face-rs/models/arcface_w600k_r50.onnx ]]; then
+  install -Dm644 /usr/share/face-rs/models/arcface_w600k_r50.onnx "$EMBEDDER"
+fi
 
 if [[ $SKIP_MODELS -eq 1 ]]; then
   echo "==> Skipping model download (--skip-models)."
@@ -135,16 +149,16 @@ fi
 
 # ── Permissions ───────────────────────────────────────────────────────────────
 echo "==> Fixing permissions..."
-chown -R root:root /etc/face-rs /usr/share/face-rs /var/lib/face-rs
-chmod 755 /var/lib/face-rs /var/lib/face-rs/users
-chmod 644 /etc/face-rs/config.toml
+chown -R root:root /etc/facegate /usr/share/facegate /var/lib/facegate
+chmod 755 /var/lib/facegate /var/lib/facegate/users
+chmod 644 /etc/facegate/config.toml
 chmod 644 "$MODELS_DIR"/*.onnx 2>/dev/null || true
 
 echo ""
 echo "Installation complete."
 echo ""
 echo "Next steps:"
-echo "  1. Set your camera:   v4l2-ctl --list-devices  →  sudo face-rs configure"
-echo "  2. Check everything:  sudo face-rs doctor"
-echo "  3. Enroll your face:  sudo face-rs add \$USER --label normal"
-echo "  4. Test:              sudo face-rs test \$USER"
+echo "  1. Set your camera:   v4l2-ctl --list-devices  →  sudo facegate configure"
+echo "  2. Check everything:  sudo facegate doctor"
+echo "  3. Enroll your face:  sudo facegate add \$USER --label normal"
+echo "  4. Test:              sudo facegate test \$USER"

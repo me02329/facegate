@@ -1,0 +1,13 @@
+[package]
+name = "pam_facegate"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "pam_facegate"
+crate-type = ["cdylib"]
+
+[dependencies]
+facegate_core = { path = "../facegate_core" }
+libc = { workspace = true }
+tracing = { workspace = true }
