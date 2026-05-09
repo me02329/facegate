@@ -8,7 +8,7 @@
 #   sudo bash install-dev.sh --skip-ort            # skip ONNX Runtime download
 set -euo pipefail
 
-ORT_VERSION="1.20.1"
+ORT_VERSION="1.24.2"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -52,7 +52,12 @@ download_ort() {
   tar -xzf "$tmp/ort.tgz" -C "$tmp"
 
   echo "    Installing to /usr/lib/..."
-  find "$tmp/$name/lib" -name 'libonnxruntime*.so*' -exec install -Dm755 {} /usr/lib/ \;
+  install -Dm755 "$tmp/$name/lib/libonnxruntime.so.${ORT_VERSION}" \
+    "/usr/lib/libonnxruntime.so.${ORT_VERSION}"
+  install -Dm755 "$tmp/$name/lib/libonnxruntime_providers_shared.so" \
+    /usr/lib/libonnxruntime_providers_shared.so
+  ln -sf "libonnxruntime.so.${ORT_VERSION}" /usr/lib/libonnxruntime.so.1
+  ln -sf "libonnxruntime.so.1" /usr/lib/libonnxruntime.so
 
   ldconfig
   rm -rf "$tmp"
@@ -102,8 +107,9 @@ download_models() {
 }
 
 ort_present() {
-  ldconfig -p 2>/dev/null | grep -q libonnxruntime || \
-  ls /usr/lib/libonnxruntime.so* /usr/local/lib/libonnxruntime.so* 2>/dev/null | grep -q .
+  ldconfig -p 2>/dev/null | grep -q libonnxruntime && return 0
+  find /usr/lib /usr/local/lib -maxdepth 1 -name 'libonnxruntime.so*' \
+    -print -quit 2>/dev/null | grep -q .
 }
 
 # ── Parse args ────────────────────────────────────────────────────────────────

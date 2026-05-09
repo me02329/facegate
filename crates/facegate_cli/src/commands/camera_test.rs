@@ -6,11 +6,19 @@ use facegate_core::detection::ScrfdDetector;
 
 pub fn run(config: &Config, device_override: Option<&str>) -> anyhow::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel();
-    run_streaming(config, device_override, &tx)?;
-    drop(tx);
+    let config = config.clone();
+    let device_override = device_override.map(str::to_owned);
+
+    let handle =
+        std::thread::spawn(move || run_streaming(&config, device_override.as_deref(), &tx));
+
     for line in rx {
         println!("{line}");
     }
+
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("thread panicked"))??;
     Ok(())
 }
 
@@ -32,6 +40,7 @@ pub fn run_streaming(
         config.camera.width,
         config.camera.height,
         config.camera.fps,
+        config.camera.timeout_ms,
     )?;
     out!("  resolution : {}×{}", camera.width(), camera.height());
     out!("  format     : {}", camera.fourcc());
@@ -51,6 +60,8 @@ pub fn run_streaming(
     if config.models.detector.exists() {
         out!("  Loading detector...");
         let mut detector = ScrfdDetector::load(&config.models.detector)?;
+        out!("  Detector loaded.");
+        out!("  Detecting face...");
         let dets = detector.detect(&frame, config.recognition.min_face_size)?;
 
         if dets.is_empty() {

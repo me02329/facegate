@@ -23,6 +23,7 @@ impl FacePipeline {
             config.camera.width,
             config.camera.height,
             config.camera.fps,
+            config.camera.timeout_ms,
         )?;
         camera.warmup(config.camera.warmup_frames);
 

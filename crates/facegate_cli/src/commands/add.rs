@@ -14,14 +14,23 @@ pub fn run(config: &Config, username: &str, label: Option<&str>) -> anyhow::Resu
     let label = label.map(|s| s.to_owned());
 
     let handle = std::thread::spawn(move || {
-        run_streaming(&config, Some(&username), label.as_deref(), samples, true, &tx)
+        run_streaming(
+            &config,
+            Some(&username),
+            label.as_deref(),
+            samples,
+            true,
+            &tx,
+        )
     });
 
     for line in rx {
         println!("{line}");
     }
 
-    handle.join().map_err(|_| anyhow::anyhow!("thread panicked"))??;
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("thread panicked"))??;
     Ok(())
 }
 
@@ -44,9 +53,6 @@ pub fn run_streaming(
     require_root()?;
 
     out!("Enrolling face for '{username}' (label: '{label}', {samples} sample(s))");
-    out!("Opening camera and loading models...");
-    let mut pipeline = FacePipeline::new(config)?;
-
     let store = TemplateStore::new(&config.storage.base_dir);
 
     for i in 1..=samples {
@@ -55,10 +61,9 @@ pub fn run_streaming(
             out!("Sample {i}/{samples} — position yourself in front of the camera, then press Enter...");
             wait_for_enter()?;
         }
-        out!(
-            "Capturing (timeout: {}ms)...",
-            config.camera.timeout_ms
-        );
+        out!("Opening camera and loading models...");
+        let mut pipeline = FacePipeline::new(config)?;
+        out!("Capturing (timeout: {}ms)...", config.camera.timeout_ms);
         let embedding = pipeline.capture_embedding(config)?;
         let sample_label = if samples == 1 {
             label.to_owned()
@@ -66,7 +71,10 @@ pub fn run_streaming(
             format!("{label}-{i}")
         };
         let template = store.add_template(username, &sample_label, embedding)?;
-        out!("  ✓ template #{} saved (label: '{sample_label}')", template.id);
+        out!(
+            "  ✓ template #{} saved (label: '{sample_label}')",
+            template.id
+        );
     }
 
     out!("");

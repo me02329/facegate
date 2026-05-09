@@ -7,6 +7,7 @@ use v4l::{Device, FourCC};
 
 use crate::error::{FaceRsError, Result};
 use std::ptr::NonNull;
+use std::time::Duration;
 
 /// RGB24 frame ready for ML preprocessing.
 #[derive(Debug, Clone)]
@@ -45,7 +46,13 @@ enum CaptureFormat {
 }
 
 impl V4lCamera {
-    pub fn open(device: &str, width: u32, height: u32, fps: u32) -> Result<Self> {
+    pub fn open(
+        device: &str,
+        width: u32,
+        height: u32,
+        fps: u32,
+        frame_timeout_ms: u64,
+    ) -> Result<Self> {
         let dev = Device::with_path(device)
             .map_err(|e| FaceRsError::Camera(format!("cannot open {device}: {e}")))?;
 
@@ -78,8 +85,12 @@ impl V4lCamera {
         // original Device allocated until Drop, where the stream is dropped first.
         let dev_static: &'static Device = Box::leak(Box::new(dev));
         let device_ptr = NonNull::from(dev_static);
-        let stream = MmapStream::with_buffers(dev_static, Type::VideoCapture, 4)
+        let mut stream = MmapStream::with_buffers(dev_static, Type::VideoCapture, 4)
             .map_err(|e| FaceRsError::Camera(format!("cannot start stream: {e}")))?;
+
+        // Without a per-frame timeout, poll() blocks indefinitely if the camera
+        // stalls (e.g. IR cameras that take time to initialise after STREAMON).
+        stream.set_timeout(Duration::from_millis(frame_timeout_ms.max(1)));
 
         Ok(V4lCamera {
             device_path: device.to_owned(),
@@ -112,7 +123,11 @@ impl V4lCamera {
     pub fn warmup(&mut self, n: u32) {
         for _ in 0..n {
             if let Some(stream) = self.stream.as_mut() {
-                let _ = stream.next();
+                // Stop early if the camera stalls — capture will still work or
+                // surface a proper error instead of hanging forever.
+                if stream.next().is_err() {
+                    break;
+                }
             }
         }
     }

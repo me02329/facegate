@@ -278,8 +278,7 @@ impl<'a> App<'a> {
                 _ => return,
             }
         };
-        if let (Some(action), Some(username)) =
-            (self.pending.take(), self.pending_username.take())
+        if let (Some(action), Some(username)) = (self.pending.take(), self.pending_username.take())
         {
             self.launch(action, Some(username), samples);
             self.input_mode = InputMode::Menu;
@@ -305,9 +304,14 @@ impl<'a> App<'a> {
                     commands::sudo_toggle::run_streaming(username.as_deref(), &tx)
                 }
                 Action::CameraTest => commands::camera_test::run_streaming(&config, None, &tx),
-                Action::Add => {
-                    commands::add::run_streaming(&config, username.as_deref(), None, samples, false, &tx)
-                }
+                Action::Add => commands::add::run_streaming(
+                    &config,
+                    username.as_deref(),
+                    None,
+                    samples,
+                    false,
+                    &tx,
+                ),
                 Action::List => commands::list::run_streaming(&config, username.as_deref(), &tx),
                 Action::Test => commands::test::run_streaming(&config, username.as_deref(), &tx),
                 Action::Configure => unreachable!(),
