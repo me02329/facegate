@@ -192,6 +192,9 @@ impl TemplateStore {
                 tmp_path.display()
             ))
         })?;
+        fs::File::open(dir)
+            .and_then(|dir_file| dir_file.sync_all())
+            .map_err(|e| FaceRsError::Storage(format!("cannot sync {}: {e}", dir.display())))?;
         Ok(())
     }
 

@@ -1,4 +1,5 @@
 use std::io::{self, BufRead, Write};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 
 use anyhow::bail;
@@ -51,6 +52,8 @@ pub fn run_streaming(
     }
 
     require_root()?;
+    require_system_user(username)?;
+    require_sudo_user(username)?;
 
     out!("Enrolling face for '{username}' (label: '{label}', {samples} sample(s))");
     let store = TemplateStore::new(&config.storage.base_dir);
@@ -98,7 +101,7 @@ fn ask_sample_count() -> anyhow::Result<u32> {
         return Ok(3);
     }
     match trimmed.parse::<u32>() {
-        Ok(n) if n >= 1 && n <= 10 => Ok(n),
+        Ok(n) if (1..=10).contains(&n) => Ok(n),
         _ => bail!("invalid number of samples '{trimmed}': expected 1-10"),
     }
 }
@@ -106,6 +109,33 @@ fn ask_sample_count() -> anyhow::Result<u32> {
 fn require_root() -> anyhow::Result<()> {
     if unsafe { libc::getuid() } != 0 {
         bail!("this command requires root privileges (run with sudo)");
+    }
+    Ok(())
+}
+
+fn require_system_user(username: &str) -> anyhow::Result<()> {
+    let c_username = std::ffi::CString::new(username)
+        .map_err(|_| anyhow::anyhow!("invalid username '{username}'"))?;
+    // SAFETY: getpwnam reads a NUL-terminated string and returns a borrowed
+    // pointer owned by libc. We only test for null before the next libc call.
+    let exists = unsafe { !libc::getpwnam(c_username.as_ptr()).is_null() };
+    if !exists {
+        bail!("system user '{username}' does not exist");
+    }
+    Ok(())
+}
+
+fn require_sudo_user(username: &str) -> anyhow::Result<()> {
+    let status = Command::new("sudo")
+        .args(["-n", "-l", "-U", username])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| anyhow::anyhow!("cannot check sudo privileges for '{username}': {e}"))?;
+
+    if !status.success() {
+        bail!("system user '{username}' does not have sudo privileges");
     }
     Ok(())
 }

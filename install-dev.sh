@@ -9,6 +9,8 @@
 set -euo pipefail
 
 ORT_VERSION="1.24.2"
+DETECTOR_SHA256="5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91"
+EMBEDDER_SHA256="4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -20,6 +22,22 @@ http_get() {
     wget --show-progress -q -O "$dest" "$url"
   else
     echo "Error: neither curl nor wget found. Install one and rerun." >&2
+    return 1
+  fi
+}
+
+verify_sha256() {
+  local file="$1" expected="$2"
+  if ! command -v sha256sum &>/dev/null; then
+    echo "Error: sha256sum not found; cannot verify $file" >&2
+    return 1
+  fi
+  local actual
+  actual="$(sha256sum "$file" | awk '{print $1}')"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "Error: checksum mismatch for $file" >&2
+    echo "       expected: $expected" >&2
+    echo "       actual  : $actual" >&2
     return 1
   fi
 }
@@ -95,6 +113,8 @@ download_models() {
   done
 
   if [[ -f "$detector" && -f "$embedder" ]]; then
+    verify_sha256 "$detector" "$DETECTOR_SHA256"
+    verify_sha256 "$embedder" "$EMBEDDER_SHA256"
     echo "    Detector : $detector  ($(du -sh "$detector" | cut -f1))"
     echo "    Embedder : $embedder  ($(du -sh "$embedder" | cut -f1))"
   else

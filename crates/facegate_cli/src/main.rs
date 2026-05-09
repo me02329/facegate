@@ -57,6 +57,7 @@ enum Command {
 
 fn main() {
     let cli = Cli::parse();
+    let auth_mode = matches!(&cli.command, Some(Command::Auth { .. }));
 
     if let Some(Command::Completions { shell }) = cli.command {
         generate(
@@ -70,7 +71,7 @@ fn main() {
 
     // Auth is called internally by the PAM module (already root). Every other
     // command touches sensitive face data or system config, so we require root.
-    if !matches!(&cli.command, Some(Command::Auth { .. })) {
+    if !auth_mode {
         // SAFETY: geteuid() is always safe to call.
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("Error: facegate must be run as root (e.g. sudo facegate).");
@@ -78,15 +79,14 @@ fn main() {
         }
     }
 
-    let config = match load_config_or_default(
-        &cli.config,
-        matches!(&cli.command, Some(Command::Auth { .. })),
-    ) {
+    let config = match load_config(&cli.config, config_policy(&cli.command)) {
         Ok(c) => c,
         Err(code) => std::process::exit(code as i32),
     };
 
-    init_logging(&config.logging.level);
+    if !auth_mode {
+        init_logging(&config.logging.level);
+    }
     let config_path = cli.config.clone();
 
     match cli.command {
@@ -108,7 +108,7 @@ fn main() {
                             commands::configure::run_from_menu(config.clone(), config_path.clone());
                         match exit {
                             Ok(tui::app::ConfigureExit::Back) => {
-                                match load_config_or_default(&config_path, false) {
+                                match load_config(&config_path, ConfigPolicy::DefaultOnError) {
                                     Ok(new_config) => config = new_config,
                                     Err(_) => return,
                                 }
@@ -132,20 +132,40 @@ fn main() {
     }
 }
 
-fn load_config_or_default(
+#[derive(Debug, Clone, Copy)]
+enum ConfigPolicy {
+    Strict,
+    StrictSilent,
+    DefaultOnError,
+}
+
+fn config_policy(command: &Option<Command>) -> ConfigPolicy {
+    match command {
+        Some(Command::Auth { .. }) => ConfigPolicy::StrictSilent,
+        Some(Command::Configure) | Some(Command::Doctor) | None => ConfigPolicy::DefaultOnError,
+        _ => ConfigPolicy::Strict,
+    }
+}
+
+fn load_config(
     path: &std::path::Path,
-    auth_mode: bool,
+    policy: ConfigPolicy,
 ) -> Result<Config, facegate_core::error::AuthExitCode> {
     let config = match Config::load(path) {
         Ok(c) => c,
-        Err(e) => {
-            if auth_mode {
+        Err(e) => match policy {
+            ConfigPolicy::Strict => {
                 eprintln!("Config error: {e}");
                 return Err(facegate_core::error::AuthExitCode::ConfigError);
             }
-            eprintln!("Warning: {e} — using default config.");
-            Config::default()
-        }
+            ConfigPolicy::StrictSilent => {
+                return Err(facegate_core::error::AuthExitCode::ConfigError);
+            }
+            ConfigPolicy::DefaultOnError => {
+                eprintln!("Warning: {e} — using default config.");
+                Config::default()
+            }
+        },
     };
     Ok(config)
 }

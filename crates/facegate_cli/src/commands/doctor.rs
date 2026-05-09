@@ -2,6 +2,8 @@ use std::path::Path;
 use std::sync::mpsc::Sender;
 
 use facegate_core::config::Config;
+use facegate_core::detection::ScrfdDetector;
+use facegate_core::embedding::ArcFaceEmbedder;
 
 pub fn run(config: &Config) -> anyhow::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -47,6 +49,12 @@ pub fn run_streaming(
     );
     all_ok &= chk(
         tx,
+        "storage permissions are safe",
+        safe_dir_permissions(&config.storage.base_dir),
+        Some("run: sudo chmod 755 /var/lib/facegate /var/lib/facegate/users"),
+    );
+    all_ok &= chk(
+        tx,
         &format!("camera device  ({})", config.camera.device),
         Path::new(&config.camera.device).exists(),
         Some("check v4l2-ctl --list-devices, then update config"),
@@ -66,7 +74,9 @@ pub fn run_streaming(
 
     let ort_ok = [
         "/usr/lib/libonnxruntime.so",
+        "/usr/lib/libonnxruntime.so.1",
         "/usr/local/lib/libonnxruntime.so",
+        "/usr/local/lib/libonnxruntime.so.1",
     ]
     .iter()
     .any(|p| Path::new(p).exists());
@@ -77,6 +87,23 @@ pub fn run_streaming(
         Some("sudo pacman -S onnxruntime"),
     );
 
+    if config.models.detector.exists() {
+        all_ok &= chk(
+            tx,
+            "detector model loads",
+            ScrfdDetector::load(&config.models.detector).is_ok(),
+            Some("check ONNX Runtime version and detector model file"),
+        );
+    }
+    if config.models.embedder.exists() {
+        all_ok &= chk(
+            tx,
+            "embedder model loads",
+            ArcFaceEmbedder::load(&config.models.embedder).is_ok(),
+            Some("check ONNX Runtime version and embedder model file"),
+        );
+    }
+
     out!("");
     if all_ok {
         out!("All checks passed.");
@@ -84,6 +111,18 @@ pub fn run_streaming(
         out!("Some checks failed — see hints above.");
     }
     Ok(())
+}
+
+fn safe_dir_permissions(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.file_type().is_dir() || meta.file_type().is_symlink() {
+        return false;
+    }
+    meta.permissions().mode() & 0o022 == 0
 }
 
 fn chk(tx: &Sender<String>, label: &str, ok: bool, hint: Option<&str>) -> bool {

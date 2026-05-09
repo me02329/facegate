@@ -29,6 +29,43 @@ Everything else (ONNX Runtime, face recognition models) is downloaded automatica
 
 ## Installation
 
+### From GitHub Releases (recommended)
+
+Download the package for your distribution from the latest GitHub Release:
+
+- Debian / Ubuntu: `facegate_<version>_amd64.deb`
+- Fedora / openSUSE / RPM-based systems: `facegate-<version>.x86_64.rpm`
+
+Then install it with your system package manager:
+
+```bash
+# Debian / Ubuntu
+sudo apt install ./facegate_<version>_amd64.deb
+
+# Fedora
+sudo dnf install ./facegate-<version>.x86_64.rpm
+
+# openSUSE
+sudo zypper install ./facegate-<version>.x86_64.rpm
+```
+
+After installation, install or verify ONNX Runtime and the face models, then run:
+
+```bash
+sudo facegate doctor
+sudo facegate camera-test
+```
+
+The packaged install creates the system paths used by Facegate:
+
+- `/usr/bin/facegate`
+- `/usr/lib/security/pam_facegate.so`
+- `/etc/facegate/config.toml`
+- `/usr/share/facegate/models/`
+- `/var/lib/facegate/users/`
+
+### Development Install
+
 ```bash
 # 1. Build (as your normal user)
 cargo build --release
@@ -37,13 +74,24 @@ cargo build --release
 sudo bash install-dev.sh
 ```
 
-The install script:
+The development install script:
 - Copies `facegate` to `/usr/bin/facegate`
 - Installs `pam_facegate.so` to `/usr/lib/security/`
 - Creates `/etc/facegate/`, `/usr/share/facegate/models/`, `/var/lib/facegate/users/`
 - Installs the config, man page, and shell completions
 - Downloads ONNX Runtime (~10 MB) if not already present — skip with `--skip-ort`
 - Downloads face recognition models (~400 MB) if not already present — skip with `--skip-models`
+
+### Building Packages
+
+Release packages are produced by CI and attached to GitHub Releases. To build
+the same `.deb` and `.rpm` artifacts locally, install nFPM and run:
+
+```bash
+FACEGATE_VERSION=0.1.0 scripts/package-nfpm.sh
+```
+
+This creates packages in `dist/`.
 
 ---
 
@@ -85,7 +133,10 @@ All commands except `completions` require root.
 
 ## Enrollment
 
-When enrolling, Facegate asks how many samples to capture (1–10, default 3). Each sample is saved as a separate template, which improves recognition across varying poses and lighting conditions.
+When enrolling, Facegate first verifies that the target name is a real Unix
+user and that the user has sudo privileges. It then asks how many samples to
+capture (1–10, default 3). Each sample is saved as a separate template, which
+improves recognition across varying poses and lighting conditions.
 
 ```
 $ sudo facegate add mart
@@ -145,7 +196,7 @@ timeout_ms = 5000
 warmup_frames = 5
 
 [recognition]
-threshold = 0.35        # cosine similarity threshold (higher = stricter)
+threshold = 0.55        # cosine similarity threshold (higher = stricter)
 required_matches = 1    # how many templates must match
 max_attempts = 5        # capture attempts before giving up
 min_face_size = 80      # minimum face bounding-box size in pixels

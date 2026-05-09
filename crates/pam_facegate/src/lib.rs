@@ -25,7 +25,7 @@ const EXIT_NOT_RECOGNIZED: c_int = 1;
 const EXIT_DENIED: c_int = 6;
 
 /// Timeout for the helper process.
-const HELPER_TIMEOUT_SECS: u64 = 10;
+const HELPER_TIMEOUT_SECS: u64 = 45;
 
 /// `pam_sm_authenticate` — called by PAM to authenticate the user.
 ///
@@ -93,6 +93,7 @@ fn run_auth_helper(username: &str) -> Result<c_int, ()> {
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
+                    let _ = child.wait();
                     return Err(());
                 }
                 std::thread::sleep(Duration::from_millis(50));

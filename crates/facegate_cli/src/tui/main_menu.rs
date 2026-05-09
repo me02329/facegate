@@ -274,7 +274,7 @@ impl<'a> App<'a> {
             3
         } else {
             match s.parse::<u32>() {
-                Ok(n) if n >= 1 && n <= 10 => n,
+                Ok(n) if (1..=10).contains(&n) => n,
                 _ => return,
             }
         };

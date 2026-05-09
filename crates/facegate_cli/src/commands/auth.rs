@@ -74,6 +74,7 @@ pub fn run(config: &Config, username: &str) -> AuthExitCode {
             );
             if matches >= config.recognition.required_matches {
                 tracing::info!("auth succeeded for '{username}'");
+                eprintln!("Facegate: face recognized for {username}");
                 return AuthExitCode::Recognized;
             }
         } else if config.logging.log_failed_attempts {
