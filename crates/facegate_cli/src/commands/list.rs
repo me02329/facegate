@@ -34,10 +34,16 @@ pub fn run_streaming(
     }
 
     out!("Templates for '{username}':\n");
-    out!("  {:<4}  {:<20}  Label", "ID", "Created");
-    out!("  {}", "─".repeat(46));
+    out!("  {:<4}  {:<20}  {:<8}  Label", "ID", "Created", "Scope");
+    out!("  {}", "─".repeat(57));
     for t in &templates.templates {
-        out!("  {:<4}  {:<20}  {}", t.id, t.created_at, t.label);
+        out!(
+            "  {:<4}  {:<20}  {:<8}  {}",
+            t.id,
+            t.created_at,
+            t.scope.label(),
+            t.label
+        );
     }
     Ok(())
 }

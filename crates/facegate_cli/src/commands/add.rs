@@ -5,7 +5,7 @@ use std::sync::mpsc::Sender;
 use anyhow::bail;
 use facegate_core::config::Config;
 use facegate_core::pipeline::FacePipeline;
-use facegate_core::storage::TemplateStore;
+use facegate_core::storage::{TemplateScope, TemplateStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnrollmentTarget {
@@ -24,6 +24,14 @@ impl EnrollmentTarget {
             EnrollmentTarget::Sudo => "sudo",
             EnrollmentTarget::Session => "session",
             EnrollmentTarget::Both => "sudo+session",
+        }
+    }
+
+    pub fn template_scope(self) -> TemplateScope {
+        match self {
+            EnrollmentTarget::Sudo => TemplateScope::Sudo,
+            EnrollmentTarget::Session => TemplateScope::Session,
+            EnrollmentTarget::Both => TemplateScope::Both,
         }
     }
 }
@@ -106,7 +114,8 @@ pub fn run_streaming(
         } else {
             format!("{label}-{i}")
         };
-        let template = store.add_template(username, &sample_label, embedding)?;
+        let template =
+            store.add_template(username, &sample_label, target.template_scope(), embedding)?;
         out!(
             "  ✓ template #{} saved (label: '{sample_label}')",
             template.id

@@ -9,7 +9,7 @@
 mod pam_sys;
 
 use libc::{c_char, c_int, c_void};
-use pam_sys::{pam_get_item, PamHandle, PAM_USER};
+use pam_sys::{pam_get_item, PamHandle, PAM_SERVICE, PAM_USER};
 use std::ffi::CStr;
 use std::process::Command;
 use std::time::Duration;
@@ -42,8 +42,9 @@ pub unsafe extern "C" fn pam_sm_authenticate(
         Some(u) => u,
         None => return PAM_AUTH_ERR,
     };
+    let service = get_pam_item_string(pamh, PAM_SERVICE);
 
-    match run_auth_helper(&username) {
+    match run_auth_helper(&username, service.as_deref()) {
         Ok(EXIT_RECOGNIZED) => PAM_SUCCESS,
         Ok(EXIT_NOT_RECOGNIZED) => PAM_IGNORE,
         Ok(EXIT_DENIED) => PAM_AUTH_ERR,
@@ -68,8 +69,12 @@ pub unsafe extern "C" fn pam_sm_setcred(
 
 /// Retrieve the PAM username as an owned String.
 unsafe fn get_username(pamh: *mut PamHandle) -> Option<String> {
+    get_pam_item_string(pamh, PAM_USER)
+}
+
+unsafe fn get_pam_item_string(pamh: *mut PamHandle, item_type: c_int) -> Option<String> {
     let mut item: *const c_void = std::ptr::null();
-    let ret = pam_get_item(pamh, PAM_USER, &mut item);
+    let ret = pam_get_item(pamh, item_type, &mut item);
     if ret != PAM_SUCCESS || item.is_null() {
         return None;
     }
@@ -77,11 +82,13 @@ unsafe fn get_username(pamh: *mut PamHandle) -> Option<String> {
     cstr.to_str().ok().map(|s| s.to_owned())
 }
 
-fn run_auth_helper(username: &str) -> Result<c_int, ()> {
-    let mut child = Command::new("/usr/bin/facegate")
-        .args(["auth", "--user", username])
-        .spawn()
-        .map_err(|_| ())?;
+fn run_auth_helper(username: &str, service: Option<&str>) -> Result<c_int, ()> {
+    let mut command = Command::new("/usr/bin/facegate");
+    command.args(["auth", "--user", username]);
+    if let Some(service) = service {
+        command.args(["--service", service]);
+    }
+    let mut child = command.spawn().map_err(|_| ())?;
 
     // Wait with a hard timeout so PAM is never blocked indefinitely.
     let deadline = std::time::Instant::now() + Duration::from_secs(HELPER_TIMEOUT_SECS);

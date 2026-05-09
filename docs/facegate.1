@@ -109,6 +109,9 @@ Use
 for login/session authentication of non-sudo local users, or
 .B --for both
 to enroll a sudo-capable user for both flows.
+Templates are scoped: session-only templates are not accepted for sudo
+authentication, and sudo-only templates are not accepted for login/session
+authentication.
 .TP
 .B session-auth
 Toggle Facegate in supported login/session PAM service files found on the

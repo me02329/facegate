@@ -13,7 +13,46 @@ pub struct EnrolledTemplate {
     pub id: u32,
     pub label: String,
     pub created_at: String,
+    #[serde(default = "default_template_scope")]
+    pub scope: TemplateScope,
     pub embedding: Embedding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TemplateScope {
+    Sudo,
+    Session,
+    Both,
+}
+
+impl TemplateScope {
+    pub fn allows(self, auth_scope: AuthScope) -> bool {
+        matches!(
+            (self, auth_scope),
+            (TemplateScope::Both, _)
+                | (TemplateScope::Sudo, AuthScope::Sudo)
+                | (TemplateScope::Session, AuthScope::Session)
+        )
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TemplateScope::Sudo => "sudo",
+            TemplateScope::Session => "session",
+            TemplateScope::Both => "both",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthScope {
+    Sudo,
+    Session,
+}
+
+fn default_template_scope() -> TemplateScope {
+    TemplateScope::Both
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -227,6 +266,7 @@ impl TemplateStore {
         &self,
         username: &str,
         label: &str,
+        scope: TemplateScope,
         embedding: Embedding,
     ) -> Result<EnrolledTemplate> {
         let mut store = self.load(username)?;
@@ -236,6 +276,7 @@ impl TemplateStore {
             id,
             label: label.to_owned(),
             created_at,
+            scope,
             embedding,
         };
         store.templates.push(template.clone());
@@ -265,6 +306,24 @@ impl TemplateStore {
             return Err(FaceRsError::NotEnrolled);
         }
         Ok(store.templates.into_iter().map(|t| t.embedding).collect())
+    }
+
+    pub fn embeddings_for_scope(
+        &self,
+        username: &str,
+        auth_scope: AuthScope,
+    ) -> Result<Vec<Embedding>> {
+        let store = self.load(username)?;
+        let embeddings = store
+            .templates
+            .into_iter()
+            .filter(|t| t.scope.allows(auth_scope))
+            .map(|t| t.embedding)
+            .collect::<Vec<_>>();
+        if embeddings.is_empty() {
+            return Err(FaceRsError::NotEnrolled);
+        }
+        Ok(embeddings)
     }
 }
 
@@ -302,7 +361,7 @@ mod tests {
         let (_dir, store) = temp_store();
         let emb = vec![0.1_f32, 0.2, 0.3];
         store
-            .add_template("alice", "alice-normal", emb.clone())
+            .add_template("alice", "alice-normal", TemplateScope::Both, emb.clone())
             .expect("add");
         let loaded = store.load("alice").expect("load");
         assert_eq!(loaded.templates.len(), 1);
@@ -313,8 +372,12 @@ mod tests {
     #[test]
     fn remove_template() {
         let (_dir, store) = temp_store();
-        store.add_template("bob", "bob-1", vec![1.0]).expect("add");
-        store.add_template("bob", "bob-2", vec![2.0]).expect("add");
+        store
+            .add_template("bob", "bob-1", TemplateScope::Both, vec![1.0])
+            .expect("add");
+        store
+            .add_template("bob", "bob-2", TemplateScope::Both, vec![2.0])
+            .expect("add");
         store.remove_template("bob", 0).expect("remove");
         let loaded = store.load("bob").expect("load");
         assert_eq!(loaded.templates.len(), 1);
@@ -323,10 +386,34 @@ mod tests {
     }
 
     #[test]
+    fn filters_embeddings_by_auth_scope() {
+        let (_dir, store) = temp_store();
+        store
+            .add_template("alice", "sudo", TemplateScope::Sudo, vec![1.0])
+            .expect("add");
+        store
+            .add_template("alice", "session", TemplateScope::Session, vec![2.0])
+            .expect("add");
+        store
+            .add_template("alice", "both", TemplateScope::Both, vec![3.0])
+            .expect("add");
+
+        let sudo = store
+            .embeddings_for_scope("alice", AuthScope::Sudo)
+            .expect("sudo embeddings");
+        assert_eq!(sudo, vec![vec![1.0], vec![3.0]]);
+
+        let session = store
+            .embeddings_for_scope("alice", AuthScope::Session)
+            .expect("session embeddings");
+        assert_eq!(session, vec![vec![2.0], vec![3.0]]);
+    }
+
+    #[test]
     fn rejects_path_traversal_usernames() {
         let (_dir, store) = temp_store();
         let err = store
-            .add_template("../root", "bad", vec![1.0])
+            .add_template("../root", "bad", TemplateScope::Both, vec![1.0])
             .expect_err("username rejected");
         assert!(err.to_string().contains("invalid username"));
     }
@@ -335,7 +422,7 @@ mod tests {
     fn saved_file_is_private() {
         let (dir, store) = temp_store();
         store
-            .add_template("alice", "alice-normal", vec![1.0])
+            .add_template("alice", "alice-normal", TemplateScope::Both, vec![1.0])
             .expect("add");
         let path = dir.path().join("alice").join("embeddings.json");
         let mode = fs::metadata(path).expect("metadata").permissions().mode() & 0o777;

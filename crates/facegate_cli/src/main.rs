@@ -51,6 +51,8 @@ enum Command {
     Auth {
         #[arg(long)]
         user: String,
+        #[arg(long)]
+        service: Option<String>,
     },
     /// Print shell completion script to stdout
     Completions {
@@ -209,8 +211,8 @@ fn run_command(
         Command::List { username } => commands::list::run(&config, &username),
         Command::Remove { username, id } => commands::remove::run(&config, &username, id),
         Command::Test { username } => commands::test::run(&config, &username),
-        Command::Auth { user } => {
-            std::process::exit(commands::auth::run(&config, &user) as i32);
+        Command::Auth { user, service } => {
+            std::process::exit(commands::auth::run(&config, &user, service.as_deref()) as i32);
         }
         Command::Completions { .. } => unreachable!(),
     }

@@ -1,6 +1,7 @@
 use libc::{c_int, c_void};
 
 pub const PAM_USER: c_int = 2;
+pub const PAM_SERVICE: c_int = 1;
 
 /// Opaque PAM handle — we never construct one, only forward the pointer.
 #[repr(C)]

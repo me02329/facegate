@@ -2,16 +2,17 @@ use facegate_core::config::Config;
 use facegate_core::error::{AuthExitCode, FaceRsError};
 use facegate_core::matching::is_match;
 use facegate_core::pipeline::FacePipeline;
-use facegate_core::storage::TemplateStore;
+use facegate_core::storage::{AuthScope, TemplateStore};
 
 /// Non-interactive authentication called by the PAM module.
 /// Returns an exit code — caller must pass it to std::process::exit.
-pub fn run(config: &Config, username: &str) -> AuthExitCode {
+pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCode {
     tracing::info!("auth requested for '{username}'");
+    let auth_scope = auth_scope_for_service(service);
 
     // Load enrolled templates first — cheap check before opening camera.
     let store = TemplateStore::new(&config.storage.base_dir);
-    let enrolled = match store.embeddings_for(username) {
+    let enrolled = match store.embeddings_for_scope(username, auth_scope) {
         Ok(e) => e,
         Err(FaceRsError::NotEnrolled) => {
             tracing::warn!("'{username}' has no enrolled templates");
@@ -83,6 +84,13 @@ pub fn run(config: &Config, username: &str) -> AuthExitCode {
     }
 
     fallback_or_deny(config)
+}
+
+fn auth_scope_for_service(service: Option<&str>) -> AuthScope {
+    match service {
+        Some("sudo") | Some("sudo-i") => AuthScope::Sudo,
+        _ => AuthScope::Session,
+    }
 }
 
 fn fallback_or_deny(config: &Config) -> AuthExitCode {

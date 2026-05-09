@@ -140,6 +140,10 @@ the user has sudo privileges. For login/session authentication, use
 `--for session`. To enroll once for both sudo and session authentication, use
 `--for both`.
 
+Templates are scoped. A `--for session` template is not accepted for sudo
+authentication, while a `--for sudo` template is not accepted for login/session
+authentication. `--for both` intentionally allows both flows.
+
 Facegate then asks how many samples to capture (1–10, default 3). Each sample
 is saved as a separate template, which improves recognition across varying poses
 and lighting conditions.
