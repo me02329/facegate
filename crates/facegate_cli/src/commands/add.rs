@@ -9,12 +9,20 @@ use facegate_core::storage::TemplateStore;
 
 pub fn run(config: &Config, username: &str, label: Option<&str>) -> anyhow::Result<()> {
     let samples = ask_sample_count()?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    run_streaming(config, Some(username), label, samples, &tx)?;
-    drop(tx);
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let config = config.clone();
+    let username = username.to_owned();
+    let label = label.map(|s| s.to_owned());
+
+    let handle = std::thread::spawn(move || {
+        run_streaming(&config, Some(&username), label.as_deref(), samples, &tx)
+    });
+
     for line in rx {
         println!("{line}");
     }
+
+    handle.join().map_err(|_| anyhow::anyhow!("thread panicked"))??;
     Ok(())
 }
 
@@ -40,14 +48,11 @@ pub fn run_streaming(
     let store = TemplateStore::new(&config.storage.base_dir);
 
     for i in 1..=samples {
-        if i > 1 {
-            out!("");
-            out!("Next capture in 2 seconds — stay in position...");
-            std::thread::sleep(Duration::from_secs(2));
-        }
         out!("");
+        out!("Sample {i}/{samples} — look at the camera, capturing in 3 seconds...");
+        std::thread::sleep(Duration::from_secs(3));
         out!(
-            "Sample {i}/{samples} — capturing (timeout: {}ms)...",
+            "Capturing (timeout: {}ms)...",
             config.camera.timeout_ms
         );
         let embedding = pipeline.capture_embedding(config)?;
