@@ -1,0 +1,28 @@
+[camera]
+device = "/dev/video2"
+width = 640
+height = 360
+fps = 30
+timeout_ms = 5000
+warmup_frames = 3
+
+[recognition]
+threshold = 0.55
+required_matches = 1
+max_attempts = 3
+min_face_size = 80
+
+[models]
+detector = "/usr/share/face-rs/models/scrfd_500m.onnx"
+embedder = "/usr/share/face-rs/models/arcface_w600k_r50.onnx"
+
+[storage]
+base_dir = "/var/lib/face-rs/users"
+
+[logging]
+level = "info"
+log_failed_attempts = true
+
+[security]
+allow_password_fallback = true
+deny_on_camera_error = false
