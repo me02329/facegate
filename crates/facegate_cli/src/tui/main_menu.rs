@@ -147,6 +147,7 @@ fn build_items(sudo_enabled: bool) -> Vec<MenuItem> {
 enum InputMode {
     Menu,
     UsernameInput,
+    SampleCountInput,
 }
 
 enum PanelState {
@@ -172,7 +173,9 @@ struct App<'a> {
     selected: usize,
     input_mode: InputMode,
     username_buf: String,
+    sample_count_buf: String,
     pending: Option<Action>,
+    pending_username: Option<String>,
     panel: PanelState,
     sudo_enabled: bool,
     /// When set, the loop exits and main re-opens the config TUI.
@@ -189,7 +192,9 @@ impl<'a> App<'a> {
             selected: 0,
             input_mode: InputMode::Menu,
             username_buf: String::new(),
+            sample_count_buf: String::new(),
             pending: None,
+            pending_username: None,
             panel: PanelState::Idle,
             sudo_enabled,
             open_config: false,
@@ -240,7 +245,7 @@ impl<'a> App<'a> {
                 self.username_buf.clear();
                 self.input_mode = InputMode::UsernameInput;
             } else {
-                self.launch(action, None);
+                self.launch(action, None, 1);
             }
         }
     }
@@ -250,8 +255,33 @@ impl<'a> App<'a> {
         if name.is_empty() {
             return;
         }
-        if let Some(action) = self.pending.take() {
-            self.launch(action, Some(name));
+        if let Some(action) = self.pending.clone() {
+            if action == Action::Add {
+                self.pending_username = Some(name);
+                self.sample_count_buf = "3".to_owned();
+                self.input_mode = InputMode::SampleCountInput;
+            } else {
+                self.pending = None;
+                self.launch(action, Some(name), 1);
+                self.input_mode = InputMode::Menu;
+            }
+        }
+    }
+
+    fn confirm_sample_count(&mut self) {
+        let s = self.sample_count_buf.trim().to_owned();
+        let samples = if s.is_empty() {
+            3
+        } else {
+            match s.parse::<u32>() {
+                Ok(n) if n >= 1 && n <= 10 => n,
+                _ => return,
+            }
+        };
+        if let (Some(action), Some(username)) =
+            (self.pending.take(), self.pending_username.take())
+        {
+            self.launch(action, Some(username), samples);
             self.input_mode = InputMode::Menu;
         }
     }
@@ -259,10 +289,12 @@ impl<'a> App<'a> {
     fn cancel_input(&mut self) {
         self.input_mode = InputMode::Menu;
         self.pending = None;
+        self.pending_username = None;
         self.username_buf.clear();
+        self.sample_count_buf.clear();
     }
 
-    fn launch(&mut self, action: Action, username: Option<String>) {
+    fn launch(&mut self, action: Action, username: Option<String>, samples: u32) {
         let (tx, rx) = mpsc::channel::<String>();
         let config = self.config.clone();
 
@@ -274,7 +306,7 @@ impl<'a> App<'a> {
                 }
                 Action::CameraTest => commands::camera_test::run_streaming(&config, None, &tx),
                 Action::Add => {
-                    commands::add::run_streaming(&config, username.as_deref(), None, &tx)
+                    commands::add::run_streaming(&config, username.as_deref(), None, samples, false, &tx)
                 }
                 Action::List => commands::list::run_streaming(&config, username.as_deref(), &tx),
                 Action::Test => commands::test::run_streaming(&config, username.as_deref(), &tx),
@@ -373,6 +405,15 @@ fn handle_key(app: &mut App, code: KeyCode) {
             KeyCode::Char(c) => app.username_buf.push(c),
             _ => {}
         },
+        InputMode::SampleCountInput => match code {
+            KeyCode::Enter => app.confirm_sample_count(),
+            KeyCode::Esc => app.cancel_input(),
+            KeyCode::Backspace => {
+                app.sample_count_buf.pop();
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => app.sample_count_buf.push(c),
+            _ => {}
+        },
         InputMode::Menu => {
             // In Done state, arrows scroll; Enter/Esc go back to menu
             if matches!(app.panel, PanelState::Done { .. }) {
@@ -437,6 +478,9 @@ fn render(f: &mut Frame, app: &App) {
 
     if app.input_mode == InputMode::UsernameInput {
         render_username_popup(f, app);
+    }
+    if app.input_mode == InputMode::SampleCountInput {
+        render_sample_count_popup(f, app);
     }
 }
 
@@ -704,6 +748,70 @@ fn render_username_popup(f: &mut Frame, app: &App) {
     );
     f.render_widget(
         Paragraph::new(format!(" {}_", app.username_buf))
+            .style(Style::default().fg(Color::Yellow))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow)),
+            ),
+        layout[3],
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "[Enter]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" confirm   "),
+            Span::styled(
+                "[Esc]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" cancel"),
+        ]))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::DarkGray)),
+        layout[5],
+    );
+}
+
+fn render_sample_count_popup(f: &mut Frame, app: &App) {
+    let area = centered_rect(44, 36, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            " Samples ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    f.render_widget(
+        Paragraph::new("  How many samples to capture? (1–10)")
+            .style(Style::default().fg(Color::DarkGray)),
+        layout[1],
+    );
+    f.render_widget(
+        Paragraph::new(format!(" {}_", app.sample_count_buf))
             .style(Style::default().fg(Color::Yellow))
             .block(
                 Block::default()
