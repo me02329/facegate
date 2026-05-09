@@ -104,11 +104,7 @@ mkdir -p /usr/share/facegate/models
 mkdir -p /var/lib/facegate/users
 
 echo "==> Installing config..."
-if [[ ! -f /etc/facegate/config.toml && -f /etc/face-rs/config.toml ]]; then
-  install -Dm644 /etc/face-rs/config.toml /etc/facegate/config.toml
-  sed -i 's#/usr/share/face-rs#/usr/share/facegate#g; s#/var/lib/face-rs#/var/lib/facegate#g' /etc/facegate/config.toml
-  echo "    Migrated /etc/face-rs/config.toml to /etc/facegate/config.toml"
-elif [[ ! -f /etc/facegate/config.toml ]]; then
+if [[ ! -f /etc/facegate/config.toml ]]; then
   install -Dm644 config.example.toml /etc/facegate/config.toml
   echo "    Installed /etc/facegate/config.toml (edit to set your camera device)"
 else
@@ -130,13 +126,6 @@ install -Dm644 docs/facegate.1 /usr/share/man/man1/facegate.1
 MODELS_DIR="/usr/share/facegate/models"
 DETECTOR="$MODELS_DIR/scrfd_500m.onnx"
 EMBEDDER="$MODELS_DIR/arcface_w600k_r50.onnx"
-
-if [[ ! -f "$DETECTOR" && -f /usr/share/face-rs/models/scrfd_500m.onnx ]]; then
-  install -Dm644 /usr/share/face-rs/models/scrfd_500m.onnx "$DETECTOR"
-fi
-if [[ ! -f "$EMBEDDER" && -f /usr/share/face-rs/models/arcface_w600k_r50.onnx ]]; then
-  install -Dm644 /usr/share/face-rs/models/arcface_w600k_r50.onnx "$EMBEDDER"
-fi
 
 if [[ $SKIP_MODELS -eq 1 ]]; then
   echo "==> Skipping model download (--skip-models)."
