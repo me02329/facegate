@@ -162,21 +162,20 @@ Note: ONNX Runtime is required but was not found.
 MSG
 fi
 
-# ── Models prompt ─────────────────────────────────────────────────────────────
+# ── Models — always download (required, no distro package available) ──────────
 echo ""
 if models_present; then
     echo "✓ Face recognition models already installed."
-elif is_interactive; then
-    if ask_yn "Download face recognition models? (~400 MB)"; then
-        install_models
-    else
-        echo "Skipped. Run 'sudo facegate doctor' for manual install instructions."
-    fi
 else
-    cat <<'MSG'
-Note: Face recognition models are required but were not found.
-  Run 'sudo facegate doctor' after installation for step-by-step instructions.
-MSG
+    if is_interactive; then
+        ask_yn "Download face recognition models? (~400 MB)" || {
+            echo "Skipped. Run 'sudo facegate doctor' for manual install instructions."
+            models_skipped=1
+        }
+    fi
+    if [ "${models_skipped:-0}" = "0" ]; then
+        install_models
+    fi
 fi
 
 # ── Next steps ────────────────────────────────────────────────────────────────

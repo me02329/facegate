@@ -63,13 +63,13 @@ pub fn run_streaming(
         tx,
         &format!("detector model  ({})", config.models.detector.display()),
         config.models.detector.exists(),
-        Some("run: sudo bash install-dev.sh"),
+        Some("reinstall the package or run: sudo bash install-dev.sh"),
     );
     all_ok &= chk(
         tx,
         &format!("embedder model  ({})", config.models.embedder.display()),
         config.models.embedder.exists(),
-        Some("run: sudo bash install-dev.sh"),
+        Some("reinstall the package or run: sudo bash install-dev.sh"),
     );
 
     let ort_ok = [
