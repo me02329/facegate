@@ -14,15 +14,23 @@ contents:
     dst: /usr/bin/facegate
     file_info:
       mode: 0755
+
   - src: target/release/libpam_facegate.so
     dst: /usr/lib/security/pam_facegate.so
     file_info:
       mode: 0755
+
   - src: config.example.toml
     dst: /etc/facegate/config.toml
     type: config|noreplace
     file_info:
       mode: 0644
+
+  - src: systemd/facegate-watch.service
+    dst: /usr/lib/systemd/user/facegate-watch.service
+    file_info:
+      mode: 0644
+
   - src: docs/facegate.1
     dst: /usr/share/man/man1/facegate.1
     file_info:
