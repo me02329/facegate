@@ -80,7 +80,9 @@ unsafe fn send_info(pamh: *mut PamHandle, text: &str) {
     }
     let conv = &*(item as *const PamConv);
     let Some(conv_fn) = conv.conv else { return };
-    let Ok(c_text) = CString::new(text) else { return };
+    let Ok(c_text) = CString::new(text) else {
+        return;
+    };
     let msg = PamMessage {
         msg_style: PAM_TEXT_INFO,
         msg: c_text.as_ptr(),

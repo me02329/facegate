@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use futures_util::StreamExt as _;
-use zbus::Connection;
 use zbus::proxy;
+use zbus::Connection;
 
 use facegate_core::config::Config;
 use facegate_core::error::FaceRsError;
@@ -51,12 +51,10 @@ pub fn run(config: Config) -> anyhow::Result<()> {
 }
 
 async fn run_async(config: Config) -> anyhow::Result<()> {
-    let username = std::env::var("USER").context(
-        "USER env var not set — facegate-watch must run inside a user session",
-    )?;
-    let session_id = std::env::var("XDG_SESSION_ID").context(
-        "XDG_SESSION_ID not set — facegate-watch must run inside a user session",
-    )?;
+    let username = std::env::var("USER")
+        .context("USER env var not set — facegate-watch must run inside a user session")?;
+    let session_id = std::env::var("XDG_SESSION_ID")
+        .context("XDG_SESSION_ID not set — facegate-watch must run inside a user session")?;
 
     let conn = Connection::system()
         .await
@@ -189,8 +187,7 @@ fn run_recognition(
                 if is_match(&embedding, &enrolled, threshold) {
                     tracing::info!(username, "face recognised — unlocking session");
                     // Use the async D-Bus proxy from a blocking context.
-                    let result = tokio::runtime::Handle::current()
-                        .block_on(session.unlock());
+                    let result = tokio::runtime::Handle::current().block_on(session.unlock());
                     if let Err(e) = result {
                         tracing::error!("unlock call failed: {e}");
                     }

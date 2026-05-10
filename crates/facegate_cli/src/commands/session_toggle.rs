@@ -61,8 +61,10 @@ pub fn run_streaming(
 
     let known = existing_services();
     if known.is_empty() && extra_services.is_empty() && extra_files.is_empty() {
-        anyhow::bail!("no supported login PAM service found under /etc/pam.d or /usr/lib/pam.d;\
-            \nuse --pam-service <name> or --pam-file <path> to specify one manually");
+        anyhow::bail!(
+            "no supported login PAM service found under /etc/pam.d or /usr/lib/pam.d;\
+            \nuse --pam-service <name> or --pam-file <path> to specify one manually"
+        );
     }
 
     let all_enabled = known.iter().all(|(_, s)| pam_edit::service_has_line(s))
