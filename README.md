@@ -4,6 +4,10 @@
 
 Facegate lets you authenticate with your face for `sudo`, login sessions, and screen lock. It runs entirely on-device: no cloud, no network, no telemetry. The ML pipeline (SCRFD face detection + ArcFace embeddings) runs locally via ONNX Runtime.
 
+
+---
+<img width="1615" height="970" alt="image" src="https://github.com/user-attachments/assets/6f40bec9-b786-41cf-8805-edf4e9a01a1f" />
+
 ---
 
 ## Features
@@ -16,6 +20,10 @@ Facegate lets you authenticate with your face for `sudo`, login sessions, and sc
 - Template storage scoped per auth target (sudo vs. session)
 - Password fallback configurable per PAM service
 - Shell completions for bash, zsh, fish
+
+---
+
+<img width="878" height="224" alt="image" src="https://github.com/user-attachments/assets/46d59493-be2a-4ab3-b6b4-3409f98106c4" />
 
 ---
 
