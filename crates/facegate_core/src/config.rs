@@ -60,7 +60,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             camera: CameraConfig {
-                device: "/dev/video2".to_string(),
+                device: "/dev/video0".to_string(),
                 width: 640,
                 height: 360,
                 fps: 30,
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn default_config_is_valid() {
         let cfg = Config::default();
-        assert_eq!(cfg.camera.device, "/dev/video2");
+        assert_eq!(cfg.camera.device, "/dev/video0");
         assert!(cfg.recognition.threshold > 0.0 && cfg.recognition.threshold < 1.0);
         assert!(cfg.security.allow_password_fallback);
         cfg.validate().expect("default config validates");
