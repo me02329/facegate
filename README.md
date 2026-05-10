@@ -1,5 +1,42 @@
 # Facegate
 
+<p align="center">
+  <strong>Native Rust facial authentication for Linux PAM</strong>
+</p>
+
+<p align="center">
+  Face authentication for <code>sudo</code>, login sessions, and screen unlock — fully local, scriptable, and designed to avoid the legacy Python/PAM stack.
+</p>
+
+<p align="center">
+  <a href="https://github.com/me02329/facegate">
+    <img alt="Language" src="https://img.shields.io/badge/language-Rust-orange">
+  </a>
+  <a href="https://github.com/me02329/facegate">
+    <img alt="Linux" src="https://img.shields.io/badge/platform-Linux-blue">
+  </a>
+  <a href="https://github.com/me02329/facegate">
+    <img alt="PAM" src="https://img.shields.io/badge/auth-PAM-informational">
+  </a>
+  <a href="https://github.com/me02329/facegate">
+    <img alt="On device" src="https://img.shields.io/badge/ML-on--device-success">
+  </a>
+  <a href="https://github.com/me02329/facegate/blob/master/LICENSE">
+    <img alt="License" src="https://img.shields.io/github/license/me02329/facegate">
+  </a>
+</p>
+
+---
+
+## What is Facegate?
+
+Facegate is a native Linux facial authentication stack written in Rust.
+
+It provides a standard PAM module, an interactive terminal UI, and a background screen-unlock daemon. It is designed for Linux laptops with RGB or IR cameras and runs the full recognition pipeline locally using ONNX Runtime.
+
+Unlike legacy tools that depend on Python, `pam-python`, Python 2, or fragile dlib builds, Facegate keeps the PAM integration small and auditable:
+
+
 **Native facial authentication for Linux — including automatic screen unlock.**
 
 Facegate lets you authenticate with your face for `sudo`, login sessions, and screen lock. It runs entirely on-device: no cloud, no network, no telemetry. The ML pipeline (SCRFD face detection + ArcFace embeddings) runs locally via ONNX Runtime.
