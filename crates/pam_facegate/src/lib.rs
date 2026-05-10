@@ -46,7 +46,7 @@ pub unsafe extern "C" fn pam_sm_authenticate(
     };
     let service = get_pam_item_string(pamh, PAM_SERVICE);
 
-    send_info(pamh, "Scanning face\u{2026}");
+    send_info(pamh, "[ facegate ] Scanning face\u{2026}");
 
     match run_auth_helper(&username, service.as_deref()) {
         Ok(EXIT_RECOGNIZED) => PAM_SUCCESS,
