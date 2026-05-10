@@ -442,4 +442,8 @@ The key difference is that `facegate-watch` runs in the user's session (not as S
 
 ## License
 
-MIT
+Facegate is licensed under the GNU General Public License v3.0 or later.
+
+You are free to use, study, modify, and redistribute the software. Modified
+redistributions must preserve the same open-source freedoms under the GPL.
+See [LICENSE](LICENSE) for details.
