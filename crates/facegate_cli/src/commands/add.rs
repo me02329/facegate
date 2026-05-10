@@ -175,10 +175,7 @@ fn chown_user_data_dir(username: &str, base_dir: &std::path::Path) -> anyhow::Re
     let keep_gid = u32::MAX;
 
     let user_dir = base_dir.join(username);
-    for path in [
-        user_dir.clone(),
-        user_dir.join("embeddings.json"),
-    ] {
+    for path in [user_dir.clone(), user_dir.join("embeddings.json")] {
         if !path.exists() {
             continue;
         }

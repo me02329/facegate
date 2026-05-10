@@ -333,7 +333,12 @@ impl<'a> App<'a> {
                     // Show which services are enabled so the user can uncheck to disable
                     self.session_entries = commands::session_toggle::enabled_service_entries()
                         .into_iter()
-                        .map(|(name, service, path)| SessionEntry { name, service, path, keep: true })
+                        .map(|(name, service, path)| SessionEntry {
+                            name,
+                            service,
+                            path,
+                            keep: true,
+                        })
                         .collect();
                     self.session_cursor = 0;
                     self.input_mode = InputMode::SessionServiceSelect;
@@ -367,7 +372,10 @@ impl<'a> App<'a> {
                 self.enroll_session = false;
                 self.enroll_cursor = 0;
                 self.input_mode = InputMode::EnrollTargetSelect;
-            } else if matches!(action, Action::AddSudo | Action::AddSession | Action::AddBoth) {
+            } else if matches!(
+                action,
+                Action::AddSudo | Action::AddSession | Action::AddBoth
+            ) {
                 self.pending_username = Some(name);
                 self.sample_count_buf = "3".to_owned();
                 self.input_mode = InputMode::SampleCountInput;
@@ -462,7 +470,11 @@ impl<'a> App<'a> {
     fn confirm_pam_service(&mut self) {
         let service = self.pam_service_buf.trim().to_owned();
         if let Some(action) = self.pending.take() {
-            let pam_service = if service.is_empty() { None } else { Some(service) };
+            let pam_service = if service.is_empty() {
+                None
+            } else {
+                Some(service)
+            };
             self.launch(action, None, 1, pam_service);
             self.input_mode = InputMode::Menu;
         }
@@ -504,7 +516,11 @@ impl<'a> App<'a> {
             let _ = tx.send(format!("  {}", commands::pam_edit::PAM_LINE));
         });
 
-        self.panel = PanelState::Running { rx, lines: Vec::new(), tick: 0 };
+        self.panel = PanelState::Running {
+            rx,
+            lines: Vec::new(),
+            tick: 0,
+        };
     }
 
     fn toggle_template_mark(&mut self) {
@@ -515,7 +531,9 @@ impl<'a> App<'a> {
 
     fn confirm_template_delete(&mut self) {
         self.input_mode = InputMode::Menu;
-        let mut ids: Vec<u32> = self.template_entries.iter()
+        let mut ids: Vec<u32> = self
+            .template_entries
+            .iter()
             .filter(|e| e.marked)
             .map(|e| e.id)
             .collect();
@@ -539,17 +557,28 @@ impl<'a> App<'a> {
         let store = TemplateStore::new(&self.config.storage.base_dir);
 
         thread::spawn(move || {
-            let _ = tx.send(format!("Removed {} template(s) for '{username}'.", ids.len()));
+            let _ = tx.send(format!(
+                "Removed {} template(s) for '{username}'.",
+                ids.len()
+            ));
             let _ = tx.send(String::new());
             for id in ids {
                 match store.remove_template(&username, id) {
-                    Ok(_) => { let _ = tx.send(format!("  Removed template {id}")); }
-                    Err(e) => { let _ = tx.send(format!("\nError: template {id}: {e}")); }
+                    Ok(_) => {
+                        let _ = tx.send(format!("  Removed template {id}"));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(format!("\nError: template {id}: {e}"));
+                    }
                 }
             }
         });
 
-        self.panel = PanelState::Running { rx, lines: Vec::new(), tick: 0 };
+        self.panel = PanelState::Running {
+            rx,
+            lines: Vec::new(),
+            tick: 0,
+        };
     }
 
     fn cancel_input(&mut self) {
@@ -569,7 +598,13 @@ impl<'a> App<'a> {
         self.template_cursor = 0;
     }
 
-    fn launch(&mut self, action: Action, username: Option<String>, samples: u32, pam_service: Option<String>) {
+    fn launch(
+        &mut self,
+        action: Action,
+        username: Option<String>,
+        samples: u32,
+        pam_service: Option<String>,
+    ) {
         let (tx, rx) = mpsc::channel::<String>();
         let config = self.config.clone();
 
@@ -1256,7 +1291,9 @@ fn render_template_list_popup(f: &mut Frame, app: &App) {
         .border_style(Style::default().fg(Color::Cyan))
         .title(Span::styled(
             title,
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -1271,9 +1308,10 @@ fn render_template_list_popup(f: &mut Frame, app: &App) {
     .split(inner);
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("     ID   Scope    Created              Label", Style::default().fg(Color::DarkGray)),
-        ])),
+        Paragraph::new(Line::from(vec![Span::styled(
+            "     ID   Scope    Created              Label",
+            Style::default().fg(Color::DarkGray),
+        )])),
         inner_layout[1],
     );
     f.render_widget(
@@ -1297,11 +1335,19 @@ fn render_template_list_popup(f: &mut Frame, app: &App) {
         rows.push(Line::from(vec![
             Span::styled(
                 format!("{prefix}{checkbox} "),
-                Style::default().fg(if e.marked { Color::Red } else { fg }).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(if e.marked { Color::Red } else { fg })
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("{:<5} {:<8} {:<20} {}", e.id, e.scope, created, e.label),
-                Style::default().fg(if e.marked { Color::Red } else if sel { Color::Cyan } else { Color::White }),
+                Style::default().fg(if e.marked {
+                    Color::Red
+                } else if sel {
+                    Color::Cyan
+                } else {
+                    Color::White
+                }),
             ),
         ]));
     }
@@ -1309,11 +1355,26 @@ fn render_template_list_popup(f: &mut Frame, app: &App) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("[d/Space]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[d/Space]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" mark delete   "),
-            Span::styled("[Enter]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Enter]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" confirm   "),
-            Span::styled("[Esc]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Esc]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" cancel"),
         ]))
         .alignment(Alignment::Center)
@@ -1326,7 +1387,7 @@ fn render_session_service_popup(f: &mut Frame, app: &App) {
     let n = app.session_entries.len().max(1);
     let height = (n as u16 + 6).min(f.area().height.saturating_sub(4));
     let _area = centered_rect(60, 0, f.area()); // width only, height below
-    // Build a vertically-centred rect of fixed height
+                                                // Build a vertically-centred rect of fixed height
     let v = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(height),
@@ -1347,7 +1408,9 @@ fn render_session_service_popup(f: &mut Frame, app: &App) {
         .border_style(Style::default().fg(Color::Cyan))
         .title(Span::styled(
             " Session Auth — enabled services ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -1387,21 +1450,33 @@ fn render_session_service_popup(f: &mut Frame, app: &App) {
                 format!("{:<24}", e.name),
                 Style::default().fg(if selected { Color::Cyan } else { Color::White }),
             ),
-            Span::styled(
-                e.path.clone(),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(e.path.clone(), Style::default().fg(Color::DarkGray)),
         ]));
     }
     f.render_widget(Paragraph::new(list_lines), inner_layout[3]);
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("[Space]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Space]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" toggle   "),
-            Span::styled("[Enter]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Enter]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" save   "),
-            Span::styled("[Esc]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Esc]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" cancel"),
         ]))
         .alignment(Alignment::Center)
@@ -1441,7 +1516,11 @@ fn render_enroll_target_popup(f: &mut Frame, app: &App) {
     let all_checked = app.enroll_sudo && app.enroll_session;
     let items = [
         (app.enroll_sudo, "Sudo", "face auth for sudo/su commands"),
-        (app.enroll_session, "Session", "face auth at login & screen unlock"),
+        (
+            app.enroll_session,
+            "Session",
+            "face auth at login & screen unlock",
+        ),
         (all_checked, "All", "select both"),
     ];
 
@@ -1455,8 +1534,16 @@ fn render_enroll_target_popup(f: &mut Frame, app: &App) {
         };
         let checkbox = if *checked { "[x]" } else { "[ ]" };
         let line = Line::from(vec![
-            Span::styled(format!("{prefix}{checkbox} "), Style::default().fg(fg).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{label:<10}", label = label), Style::default().fg(if selected { Color::Cyan } else { Color::White }).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{prefix}{checkbox} "),
+                Style::default().fg(fg).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{label:<10}", label = label),
+                Style::default()
+                    .fg(if selected { Color::Cyan } else { Color::White })
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(format!("  {desc}"), Style::default().fg(Color::DarkGray)),
         ]);
         f.render_widget(Paragraph::new(line), row);
@@ -1464,11 +1551,26 @@ fn render_enroll_target_popup(f: &mut Frame, app: &App) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("[Space]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Space]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" toggle   "),
-            Span::styled("[Enter]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Enter]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" confirm   "),
-            Span::styled("[Esc]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Esc]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" cancel"),
         ]))
         .alignment(Alignment::Center)
