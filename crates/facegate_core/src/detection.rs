@@ -162,6 +162,16 @@ fn parse_scrfd_outputs(
             let x2 = (ax + bboxes[i * 4 + 2] * s) * scale_x;
             let y2 = (ay + bboxes[i * 4 + 3] * s) * scale_y;
 
+            // Reject degenerate boxes early: a width/height ≤ 0 means the
+            // ONNX export used an unexpected layout (CHW vs HWC, transposed
+            // bbox tensor, ...) and downstream consumers assume positive
+            // areas (NMS divides by union, the embedder needs a real crop).
+            let w = x2 - x1;
+            let h = y2 - y1;
+            if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+
             let mut points = [(0.0f32, 0.0f32); 5];
             for j in 0..5 {
                 points[j] = (

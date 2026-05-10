@@ -21,3 +21,4 @@ tracing-subscriber = { workspace = true }
 zbus = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
+v4l = { workspace = true }

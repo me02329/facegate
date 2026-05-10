@@ -10,11 +10,17 @@ pub fn load_templates(config: &Config, username: &str) -> anyhow::Result<Vec<Enr
 
 pub fn run(config: &Config, username: &str) -> anyhow::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel();
-    run_streaming(config, Some(username), &tx)?;
-    drop(tx);
+    let config = config.clone();
+    let username = username.to_owned();
+    let handle = std::thread::spawn(move || run_streaming(&config, Some(&username), &tx));
+
     for line in rx {
         println!("{line}");
     }
+
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("thread panicked"))??;
     Ok(())
 }
 

@@ -15,37 +15,67 @@ fn real_user() -> Option<(String, u32)> {
 
 fn uid_for(username: &str) -> Option<u32> {
     let c_name = std::ffi::CString::new(username).ok()?;
-    // SAFETY: getpwnam is safe to call with a valid NUL-terminated string.
-    let uid = unsafe {
-        let pw = libc::getpwnam(c_name.as_ptr());
-        if pw.is_null() {
-            return None;
-        }
-        (*pw).pw_uid
+    let mut buf = vec![0i8; 4096];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: getpwnam_r writes into `pwd`/`buf` (both owned, large enough)
+    // and reads `c_name` (NUL-terminated). It is the thread-safe form of
+    // getpwnam — the buffer must outlive the returned pwd, which it does
+    // since we only read pw_uid before this function returns.
+    let rc = unsafe {
+        libc::getpwnam_r(
+            c_name.as_ptr(),
+            &mut pwd,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        )
     };
-    Some(uid)
+    if rc != 0 || result.is_null() {
+        return None;
+    }
+    Some(pwd.pw_uid)
 }
 
 /// Run a `systemctl --user` sub-command as the real (non-root) user.
 ///
-/// Uses `runuser` (util-linux) to drop from root to the target user while
-/// keeping the correct `XDG_RUNTIME_DIR` and D-Bus socket path so that
-/// systemd's user manager is reachable.
+/// Prefers `runuser` (util-linux) and falls back to `sudo -u`. Both drop
+/// privileges to `user` while keeping the correct `XDG_RUNTIME_DIR` and
+/// D-Bus socket path so that systemd's user manager is reachable.
 fn systemctl_user(user: &str, uid: u32, args: &[&str]) -> bool {
-    Command::new("runuser")
-        .args(["-u", user, "--", "systemctl", "--user"])
-        .args(args)
-        .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
-        .env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            format!("unix:path=/run/user/{uid}/bus"),
-        )
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let xdg = format!("/run/user/{uid}");
+    let dbus = format!("unix:path=/run/user/{uid}/bus");
+
+    let try_with = |program: &str, prefix_args: &[&str]| -> Option<bool> {
+        let status = Command::new(program)
+            .args(prefix_args)
+            .args(["systemctl", "--user"])
+            .args(args)
+            .env("XDG_RUNTIME_DIR", &xdg)
+            .env("DBUS_SESSION_BUS_ADDRESS", &dbus)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .ok()?;
+        Some(status.success())
+    };
+
+    if let Some(ok) = try_with("runuser", &["-u", user, "--"]) {
+        return ok;
+    }
+    // BusyBox/Alpine images often ship without runuser — sudo is then the
+    // canonical drop-privileges helper.
+    try_with(
+        "sudo",
+        &[
+            "-u",
+            user,
+            "--preserve-env=XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS",
+            "--",
+        ],
+    )
+    .unwrap_or(false)
 }
 
 /// Returns `true` if `facegate-watch.service` is currently active (running).
@@ -69,10 +99,10 @@ pub fn run_streaming(enable: bool, tx: &Sender<String>) -> anyhow::Result<()> {
     }
 
     if !is_installed() {
-        out!("Service unit not found.");
+        out!("Service unit not found at /usr/lib/systemd/user/facegate-watch.service.");
         out!("");
-        out!("Install facegate to get the systemd unit file, then re-run.");
-        out!("  sudo bash install-dev.sh");
+        out!("Reinstall facegate from your distro's package, or run install-dev.sh");
+        out!("from the source tree if you built from source.");
         return Ok(());
     }
 

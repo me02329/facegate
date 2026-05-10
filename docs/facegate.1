@@ -110,6 +110,22 @@ and whether the
 .B facegate-watch.service
 unit file is installed.
 .TP
+.B cameras
+Enumerate every
+.I /dev/videoN
+node, print its driver/card name and supported pixel formats, and
+recommend the best device for face authentication. Devices that report
+.BR GREY ", " Y8 ", or " Y800
+are tagged as
+.B IR
+(infra-red) and preferred — they keep working in the dark and are much
+harder to spoof than a colour stream. Devices that only report
+.BR YUYV " or " MJPG
+are tagged as
+.BR RGB .
+.B cameras
+runs without root.
+.TP
 .B camera-test
 Open the configured camera, negotiate a supported pixel format, capture one
 frame, run the face detector, and report whether a face was detected.
@@ -117,7 +133,7 @@ frame, run the face detector, and report whether a face was detected.
 .TP
 .BI --device " DEVICE"
 Override the configured camera device for this run only, for example
-.IR /dev/video2 .
+.IR /dev/video0 .
 .RE
 .TP
 .B add \fIUSERNAME\fR [\fB--label\fR \fILABEL\fR] [\fB--for\fR \fIsudo|session|both\fR]
@@ -333,6 +349,14 @@ Camera device and capture settings. Common fields:
 .BR fps ,
 .BR warmup_frames ,
 .BR timeout_ms .
+.IP
+On Windows-Hello-style hardware,
+.B device
+should point at the IR sensor (typically
+.IR /dev/video2 " or " /dev/video4 ),
+not the RGB webcam. Run
+.B facegate cameras
+to discover which node is which on your laptop.
 .TP
 .B [recognition]
 Recognition policy:
@@ -395,7 +419,7 @@ sudo facegate camera-test
 .TP
 Test a specific camera device:
 .EX
-sudo facegate camera-test --device /dev/video2
+sudo facegate camera-test --device /dev/video1
 .EE
 .TP
 Enroll the current user for all auth flows:

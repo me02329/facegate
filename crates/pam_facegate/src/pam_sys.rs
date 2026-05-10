@@ -42,9 +42,7 @@ pub struct PamConv {
 }
 
 extern "C" {
-    pub fn pam_get_item(
-        pamh: *const PamHandle,
-        item_type: c_int,
-        item: *mut *const c_void,
-    ) -> c_int;
+    // Linux-PAM and OpenPAM both declare this as `pam_handle_t *`. We use a
+    // mutable pointer so future ports (OpenPAM) compile without UB warnings.
+    pub fn pam_get_item(pamh: *mut PamHandle, item_type: c_int, item: *mut *const c_void) -> c_int;
 }

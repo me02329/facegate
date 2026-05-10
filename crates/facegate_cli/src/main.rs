@@ -30,6 +30,8 @@ enum Command {
         #[arg(long)]
         device: Option<String>,
     },
+    /// List V4L2 cameras with format and IR/RGB hints
+    Cameras,
     /// Enroll a face for a user (requires root)
     Add {
         username: String,
@@ -52,7 +54,12 @@ enum Command {
     /// Remove an enrolled template (requires root)
     Remove { username: String, id: u32 },
     /// Live test authentication for a user (requires root)
-    Test { username: String },
+    Test {
+        username: String,
+        /// Which scope to match against (defaults to "all")
+        #[arg(long = "for", value_enum, default_value_t = TestPurpose::All)]
+        purpose: TestPurpose,
+    },
     /// Authenticate a user — used internally by the PAM module
     #[command(hide = true)]
     Auth {
@@ -78,6 +85,24 @@ enum EnrollmentPurpose {
     Both,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TestPurpose {
+    All,
+    Sudo,
+    Session,
+}
+
+impl From<TestPurpose> for commands::test::TestScope {
+    fn from(value: TestPurpose) -> Self {
+        use facegate_core::storage::AuthScope;
+        match value {
+            TestPurpose::All => commands::test::TestScope::All,
+            TestPurpose::Sudo => commands::test::TestScope::Auth(AuthScope::Sudo),
+            TestPurpose::Session => commands::test::TestScope::Auth(AuthScope::Session),
+        }
+    }
+}
+
 impl From<EnrollmentPurpose> for commands::add::EnrollmentTarget {
     fn from(value: EnrollmentPurpose) -> Self {
         match value {
@@ -92,6 +117,10 @@ fn main() {
     let cli = Cli::parse();
     let auth_mode = matches!(&cli.command, Some(Command::Auth { .. }));
     let watch_mode = matches!(&cli.command, Some(Command::Watch));
+    // `cameras` only opens /dev/video* in read-only-ish ways; it should be
+    // runnable as a normal user so people can discover their IR camera before
+    // running anything privileged.
+    let cameras_mode = matches!(&cli.command, Some(Command::Cameras));
 
     if let Some(Command::Completions { shell }) = cli.command {
         generate(
@@ -103,9 +132,10 @@ fn main() {
         return;
     }
 
-    // Auth and watch run as an unprivileged user. Every other command touches
-    // sensitive face data or system config, so we require root.
-    if !auth_mode && !watch_mode {
+    // Auth, watch, and the read-only `cameras` listing run as an unprivileged
+    // user. Every other command touches sensitive face data or system config,
+    // so we require root.
+    if !auth_mode && !watch_mode && !cameras_mode {
         // SAFETY: geteuid() is always safe to call.
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("Error: facegate must be run as root (e.g. sudo facegate).");
@@ -118,18 +148,7 @@ fn main() {
         Err(code) => std::process::exit(code as i32),
     };
 
-    if !auth_mode {
-        init_logging(&config.logging.level);
-    }
-    if watch_mode {
-        // Re-init logging with a format suited to a daemon (no colour, with timestamps).
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ort=warn"));
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(std::io::stderr)
-            .try_init();
-    }
+    init_logging(&config.logging.level);
     let config_path = cli.config.clone();
 
     match cli.command {
@@ -139,7 +158,7 @@ fn main() {
             // or when the user quits (returns false).
             let mut config = config;
             loop {
-                match tui::main_menu::run(&config) {
+                match tui::main_menu::run(&config, &config_path) {
                     Err(e) => {
                         eprintln!("TUI error: {e}");
                         return;
@@ -186,7 +205,9 @@ fn config_policy(command: &Option<Command>) -> ConfigPolicy {
     match command {
         Some(Command::Auth { .. }) => ConfigPolicy::StrictSilent,
         Some(Command::Configure) | Some(Command::Doctor) | None => ConfigPolicy::DefaultOnError,
-        Some(Command::Watch) => ConfigPolicy::DefaultOnError,
+        // `cameras` does not need a config at all (it walks /dev/video*),
+        // so don't fail if /etc/facegate/config.toml is missing.
+        Some(Command::Watch) | Some(Command::Cameras) => ConfigPolicy::DefaultOnError,
         _ => ConfigPolicy::Strict,
     }
 }
@@ -223,6 +244,7 @@ fn run_command(
         Command::Configure => commands::configure::run(config, config_path),
         Command::Doctor => commands::doctor::run(&config),
         Command::CameraTest { device } => commands::camera_test::run(&config, device.as_deref()),
+        Command::Cameras => commands::cameras::run(),
         Command::Add {
             username,
             label,
@@ -238,7 +260,9 @@ fn run_command(
         }
         Command::List { username } => commands::list::run(&config, &username),
         Command::Remove { username, id } => commands::remove::run(&config, &username, id),
-        Command::Test { username } => commands::test::run(&config, &username),
+        Command::Test { username, purpose } => {
+            commands::test::run(&config, &username, purpose.into())
+        }
         Command::Auth { user, service } => {
             std::process::exit(commands::auth::run(&config, &user, service.as_deref()) as i32);
         }

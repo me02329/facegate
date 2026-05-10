@@ -27,6 +27,32 @@ Facegate lets you authenticate with your face for `sudo`, login sessions, and sc
 
 Everything else (ONNX Runtime, face recognition models) is downloaded automatically by the install script.
 
+### Choosing the right camera
+
+Most laptops with Windows-Hello-style hardware expose **two** capture
+devices: a regular RGB webcam (typically `/dev/video0`) and a separate
+IR / depth sensor (often `/dev/video2`, sometimes `/dev/video4`). On
+desktops you usually only have a USB webcam and that's `/dev/video0`.
+
+Both work, but the **IR camera is strongly recommended**:
+
+- it works in the dark — your screen-unlock keeps working at night;
+- it ignores the visible screen reflection on your face;
+- it's significantly harder to spoof with a printed photograph than an
+  RGB feed.
+
+To find which device is which:
+
+```bash
+facegate cameras            # built-in: lists devices, flags IR vs RGB,
+                            # and recommends the best one
+v4l2-ctl --list-devices     # vendor names
+```
+
+Devices that report `GREY` / `Y8` / `Y800` formats are IR streams; devices
+that only report `YUYV` / `MJPG` are RGB. Update `[camera].device` in
+`/etc/facegate/config.toml` accordingly (or run `sudo facegate configure`).
+
 ---
 
 ## Installation
@@ -94,6 +120,10 @@ This produces `.deb` and `.rpm` packages in `dist/`.
 ## Quick Start
 
 ```bash
+# 0. Find the IR (or fallback RGB) camera and update the config (no root):
+facegate cameras
+sudo facegate configure                      # set [camera].device
+
 # 1. Open the interactive menu (requires root)
 sudo facegate
 
@@ -181,7 +211,7 @@ Done — 3 template(s) enrolled for 'mart'.
 
 Run `sudo facegate` and use the interactive menu:
 
-- **Sudo Auth** — toggle `pam_facegate.so` in `/etc/pam.d/sudo` (and `sudo-i`)
+- **Sudo Auth** — toggle `pam_facegate.so` in `/etc/pam.d/sudo` and (when present) `/etc/pam.d/sudo-i`
 - **Session Auth** — toggle `pam_facegate.so` in detected login/session PAM services (SDDM, LightDM, GDM, greetd, `login`, `kde`, …)
 - **Watch Daemon** — enable/disable `facegate-watch.service` for automatic screen unlock
 
@@ -190,8 +220,14 @@ Run `sudo facegate` and use the interactive menu:
 Add the following line **before** the existing `auth` lines in any PAM service file:
 
 ```
-auth      sufficient    pam_facegate.so
+auth      sufficient    /usr/lib/security/pam_facegate.so
 ```
+
+The absolute path is intentional — it makes the line work on every distro,
+including Debian/Ubuntu (which search `/usr/lib/x86_64-linux-gnu/security`)
+and Fedora (`/usr/lib64/security`). The bare-name form
+(`pam_facegate.so`) only works on distros whose PAM search path matches our
+install dir, so we no longer recommend it.
 
 > **Warning:** Always keep a root shell open while editing PAM configuration. A broken PAM config can lock you out of `sudo` and login.
 
@@ -214,15 +250,17 @@ systemctl --user enable --now facegate-watch
 | *(none)* | Open the interactive TUI menu |
 | `configure` | Edit settings in a terminal UI |
 | `doctor` | Check installation status |
+| `cameras` | List `/dev/video*` and flag IR vs RGB |
 | `camera-test [--device DEV]` | Test camera and face detection |
 | `add USERNAME [--label LABEL] [--for sudo\|session\|both]` | Enroll face templates |
 | `list USERNAME` | List enrolled templates |
 | `remove USERNAME ID` | Remove a template by ID |
-| `test USERNAME` | Live recognition test |
+| `test USERNAME [--for sudo\|session\|all]` | Live recognition test |
 | `session-auth` | Toggle face auth in login/session PAM services |
 | `completions SHELL` | Print shell completion script |
 
-All commands except `completions` require root. The `watch` subcommand (used by the systemd service) runs as the normal user.
+All commands except `completions`, `cameras`, and the internal `watch`/`auth`
+helpers require root. `cameras` and `watch` run as the normal user.
 
 ---
 
@@ -271,6 +309,10 @@ facegate/
 │   ├── facegate_core/   # camera, detection, embedding, matching, storage, config
 │   ├── facegate_cli/    # CLI + TUI + watch daemon (facegate binary)
 │   └── pam_facegate/    # PAM module (pam_facegate.so)
+├── packaging/
+│   └── nfpm/            # .deb / .rpm / .pkg.tar.zst manifests + postinstall
+├── scripts/
+│   └── package-nfpm.sh  # one-shot multi-distro package builder
 ├── systemd/
 │   └── facegate-watch.service
 ├── docs/
@@ -310,6 +352,12 @@ Face templates are stored as ArcFace embedding vectors — 512 floating-point nu
 - Enrollment (root) writes the file and immediately `chown`s it to the enrolled user for session-auth flows
 - All writes are atomic (write to `.tmp`, `fsync`, `rename`) — no partial state on power loss
 - Symlink traversal is blocked on all file operations
+
+**Note on embedding exfiltration.** Because the file is owned by the enrolled
+user, the user (or any process running as that user) can read their own ArcFace
+vector. Vectors are not photos, but a sufficiently capable adversary could use
+them to drive an image-generation model. This is acceptable in our threat model
+— same-UID code is already trusted — but worth being aware of.
 
 ### PAM module
 

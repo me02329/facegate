@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use futures_util::StreamExt as _;
+use tokio::signal::unix::{signal, SignalKind};
 use zbus::proxy;
 use zbus::Connection;
 
@@ -96,20 +97,40 @@ async fn run_async(config: Config) -> anyhow::Result<()> {
     // Track an in-progress scan so it can be cancelled on external unlock.
     let mut scan_cancel: Option<Arc<AtomicBool>> = None;
 
+    // SIGTERM is what systemd sends on `systemctl --user stop`; ctrl_c covers
+    // SIGINT for foreground use.
+    let mut sigterm =
+        signal(SignalKind::terminate()).context("failed to register SIGTERM handler")?;
+
     loop {
         tokio::select! {
             biased;
 
             // Graceful shutdown on SIGTERM or Ctrl-C.
             _ = tokio::signal::ctrl_c() => {
-                tracing::info!("received shutdown signal");
+                tracing::info!("received SIGINT — shutting down");
+                if let Some(cancel) = scan_cancel.take() {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                break;
+            }
+            _ = sigterm.recv() => {
+                tracing::info!("received SIGTERM — shutting down");
                 if let Some(cancel) = scan_cancel.take() {
                     cancel.store(true, Ordering::Relaxed);
                 }
                 break;
             }
 
-            Some(_) = lock_stream.next() => {
+            lock = lock_stream.next() => {
+                let Some(_) = lock else {
+                    // Stream ended (D-Bus disconnect). Returning Err lets
+                    // systemd's Restart=on-failure bring us back up.
+                    if let Some(cancel) = scan_cancel.take() {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                    anyhow::bail!("system D-Bus Lock stream ended unexpectedly");
+                };
                 tracing::info!("session locked — starting face recognition");
 
                 // Cancel any stale scan (shouldn't happen, but be defensive).
@@ -129,7 +150,13 @@ async fn run_async(config: Config) -> anyhow::Result<()> {
                 });
             }
 
-            Some(_) = unlock_stream.next() => {
+            unlock = unlock_stream.next() => {
+                let Some(_) = unlock else {
+                    if let Some(cancel) = scan_cancel.take() {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                    anyhow::bail!("system D-Bus Unlock stream ended unexpectedly");
+                };
                 tracing::info!("session unlocked externally — cancelling scan");
                 if let Some(cancel) = scan_cancel.take() {
                     cancel.store(true, Ordering::Relaxed);
@@ -175,6 +202,8 @@ fn run_recognition(
     };
 
     let threshold = config.recognition.threshold;
+    let required = config.recognition.required_matches.max(1);
+    let mut matches: u32 = 0;
 
     for attempt in 1..=config.recognition.max_attempts {
         if cancel.load(Ordering::Relaxed) {
@@ -185,15 +214,20 @@ fn run_recognition(
         match pipeline.capture_embedding(config) {
             Ok(embedding) => {
                 if is_match(&embedding, &enrolled, threshold) {
-                    tracing::info!(username, "face recognised — unlocking session");
-                    // Use the async D-Bus proxy from a blocking context.
-                    let result = tokio::runtime::Handle::current().block_on(session.unlock());
-                    if let Err(e) = result {
-                        tracing::error!("unlock call failed: {e}");
+                    matches += 1;
+                    tracing::debug!(attempt, matches, required, username, "match accepted");
+                    if matches >= required {
+                        tracing::info!(username, "face recognised — unlocking session");
+                        // Use the async D-Bus proxy from a blocking context.
+                        let result = tokio::runtime::Handle::current().block_on(session.unlock());
+                        if let Err(e) = result {
+                            tracing::error!("unlock call failed: {e}");
+                        }
+                        return;
                     }
-                    return;
+                } else {
+                    tracing::debug!(attempt, username, "attempt did not match");
                 }
-                tracing::debug!(attempt, username, "attempt did not match");
             }
             Err(FaceRsError::Timeout) => {
                 tracing::debug!(attempt, "capture timeout");

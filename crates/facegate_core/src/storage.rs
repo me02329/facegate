@@ -58,6 +58,13 @@ fn default_template_scope() -> TemplateScope {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UserTemplates {
     pub templates: Vec<EnrolledTemplate>,
+    /// Monotonic counter — the next id we'll hand out. Persisted so we never
+    /// reuse the id of a removed template, which kept callers (CLI scripts,
+    /// the TUI delete flow) safe from referencing a stale id.
+    /// `#[serde(default)]` keeps older `embeddings.json` files (without this
+    /// field) loadable: we recompute it from `templates` on first load.
+    #[serde(default)]
+    pub next_id: u32,
 }
 
 pub struct TemplateStore {
@@ -270,7 +277,13 @@ impl TemplateStore {
         embedding: Embedding,
     ) -> Result<EnrolledTemplate> {
         let mut store = self.load(username)?;
-        let id = store.templates.len() as u32;
+        // Heal legacy stores written before next_id was persisted.
+        let observed_max = store.templates.iter().map(|t| t.id).max();
+        if let Some(m) = observed_max {
+            store.next_id = store.next_id.max(m.saturating_add(1));
+        }
+        let id = store.next_id;
+        store.next_id = store.next_id.saturating_add(1);
         let created_at = chrono_now();
         let template = EnrolledTemplate {
             id,
@@ -293,10 +306,9 @@ impl TemplateStore {
                 "no template with id {id} for user {username}"
             )));
         }
-        // Re-number IDs to stay contiguous
-        for (i, t) in store.templates.iter_mut().enumerate() {
-            t.id = i as u32;
-        }
+        // IDs are not renumbered: callers (CLI, TUI) reference templates by ID
+        // and renumbering after a delete shifts all subsequent IDs, surprising
+        // the user and breaking any in-flight script.
         self.save(username, &store)
     }
 
@@ -327,16 +339,55 @@ impl TemplateStore {
     }
 }
 
+/// Returns a UTC RFC-3339 timestamp like `2026-05-10T12:34:56Z`. Implemented
+/// by hand to avoid pulling in chrono/time for a single string.
 fn chrono_now() -> String {
-    // Poor-man's timestamp without pulling in chrono — good enough for MVP.
-    // Replace with chrono or time crate when needed.
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // Emit as Unix timestamp for now; format nicely once we add chrono.
-    secs.to_string()
+    format_unix_utc(secs as i64)
+}
+
+fn format_unix_utc(secs: i64) -> String {
+    // Days since 1970-01-01.
+    let mut days = secs.div_euclid(86_400);
+    let secs_of_day = secs.rem_euclid(86_400);
+    let h = (secs_of_day / 3600) as u32;
+    let m = ((secs_of_day % 3600) / 60) as u32;
+    let s = (secs_of_day % 60) as u32;
+
+    // Walk forward from 1970 in years, accounting for leap years.
+    let mut year: i32 = 1970;
+    loop {
+        let dy = if is_leap(year) { 366 } else { 365 };
+        if days < dy {
+            break;
+        }
+        days -= dy;
+        year += 1;
+    }
+    static MONTH_DAYS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 0usize;
+    while month < 12 {
+        let mut dm = MONTH_DAYS[month] as i64;
+        if month == 1 && is_leap(year) {
+            dm += 1;
+        }
+        if days < dm {
+            break;
+        }
+        days -= dm;
+        month += 1;
+    }
+    let day = days as u32 + 1;
+    let month_num = month as u32 + 1;
+    format!("{year:04}-{month_num:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+fn is_leap(y: i32) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
 #[cfg(test)]
@@ -381,8 +432,25 @@ mod tests {
         store.remove_template("bob", 0).expect("remove");
         let loaded = store.load("bob").expect("load");
         assert_eq!(loaded.templates.len(), 1);
-        assert_eq!(loaded.templates[0].id, 0); // re-numbered
+        // IDs are stable across deletes; the surviving template keeps its id.
+        assert_eq!(loaded.templates[0].id, 1);
         assert_eq!(loaded.templates[0].label, "bob-2");
+    }
+
+    #[test]
+    fn add_after_remove_does_not_reuse_id() {
+        let (_dir, store) = temp_store();
+        store
+            .add_template("eve", "eve-1", TemplateScope::Both, vec![1.0])
+            .expect("add");
+        store
+            .add_template("eve", "eve-2", TemplateScope::Both, vec![2.0])
+            .expect("add");
+        store.remove_template("eve", 1).expect("remove");
+        let new = store
+            .add_template("eve", "eve-3", TemplateScope::Both, vec![3.0])
+            .expect("add");
+        assert_eq!(new.id, 2);
     }
 
     #[test]
@@ -427,6 +495,16 @@ mod tests {
         let path = dir.path().join("alice").join("embeddings.json");
         let mode = fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn format_unix_utc_known_values() {
+        // 2024-01-01T00:00:00Z = 1704067200
+        assert_eq!(format_unix_utc(1_704_067_200), "2024-01-01T00:00:00Z");
+        // 2026-05-10T00:00:00Z = 1778371200
+        assert_eq!(format_unix_utc(1_778_371_200), "2026-05-10T00:00:00Z");
+        // Leap day: 2024-02-29T12:34:56Z = 1709210096
+        assert_eq!(format_unix_utc(1_709_210_096), "2024-02-29T12:34:56Z");
     }
 
     #[test]
