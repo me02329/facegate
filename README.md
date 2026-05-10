@@ -22,6 +22,8 @@ Facegate lets you authenticate with your face for `sudo`, login sessions, and sc
 - Shell completions for bash, zsh, fish
 
 ---
+<img width="878" height="224" alt="image" src="https://github.com/user-attachments/assets/9faee7ed-22a7-4f32-b85a-95aad87dd99e" />
+
 
 ---
 
