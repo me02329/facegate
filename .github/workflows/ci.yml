@@ -64,7 +64,7 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum *.deb *.rpm > checksums.sha256
+          sha256sum *.deb *.rpm *.pkg.tar.zst > checksums.sha256
           cat checksums.sha256
 
       - name: Import GPG key
