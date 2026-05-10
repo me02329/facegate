@@ -77,7 +77,7 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
             );
             if matches >= config.recognition.required_matches {
                 tracing::info!("auth succeeded for '{username}'");
-                eprintln!("[ facegate ] \u{2714} Face recognized — welcome, {username}");
+                eprintln!("[ facegate ] \u{2714} Face recognized : {username}");
                 return AuthExitCode::Recognized;
             }
         } else if config.logging.log_failed_attempts {
