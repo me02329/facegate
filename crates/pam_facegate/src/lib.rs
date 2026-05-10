@@ -9,8 +9,10 @@
 mod pam_sys;
 
 use libc::{c_char, c_int, c_void};
-use pam_sys::{pam_get_item, PamHandle, PAM_SERVICE, PAM_USER};
-use std::ffi::CStr;
+use pam_sys::{
+    pam_get_item, PamConv, PamHandle, PamMessage, PAM_CONV, PAM_SERVICE, PAM_TEXT_INFO, PAM_USER,
+};
+use std::ffi::{CStr, CString};
 use std::process::Command;
 use std::time::Duration;
 
@@ -44,6 +46,8 @@ pub unsafe extern "C" fn pam_sm_authenticate(
     };
     let service = get_pam_item_string(pamh, PAM_SERVICE);
 
+    send_info(pamh, "Scanning face\u{2026}");
+
     match run_auth_helper(&username, service.as_deref()) {
         Ok(EXIT_RECOGNIZED) => PAM_SUCCESS,
         Ok(EXIT_NOT_RECOGNIZED) => PAM_IGNORE,
@@ -65,6 +69,29 @@ pub unsafe extern "C" fn pam_sm_setcred(
     _argv: *const *const c_char,
 ) -> c_int {
     PAM_SUCCESS
+}
+
+/// Send a PAM_TEXT_INFO message through the application's conversation function.
+/// Silently ignored if the conversation is unavailable.
+unsafe fn send_info(pamh: *mut PamHandle, text: &str) {
+    let mut item: *const c_void = std::ptr::null();
+    if pam_get_item(pamh, PAM_CONV, &mut item) != PAM_SUCCESS || item.is_null() {
+        return;
+    }
+    let conv = &*(item as *const PamConv);
+    let Some(conv_fn) = conv.conv else { return };
+    let Ok(c_text) = CString::new(text) else { return };
+    let msg = PamMessage {
+        msg_style: PAM_TEXT_INFO,
+        msg: c_text.as_ptr(),
+    };
+    let msg_ptr: *const PamMessage = &msg;
+    let mut resp: *mut pam_sys::PamResponse = std::ptr::null_mut();
+    conv_fn(1, &msg_ptr, &mut resp, conv.appdata_ptr);
+    // Free any response the application allocated (PAM spec requires the module to free it).
+    if !resp.is_null() {
+        libc::free(resp as *mut c_void);
+    }
 }
 
 /// Retrieve the PAM username as an owned String.

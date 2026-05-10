@@ -104,6 +104,16 @@ pub fn run_streaming(
         );
     }
 
+    // Check that the watch service unit is installed.
+    let service_installed = Path::new("/usr/lib/systemd/user/facegate-watch.service").exists()
+        || Path::new("/etc/systemd/user/facegate-watch.service").exists();
+    all_ok &= chk(
+        tx,
+        "facegate-watch.service installed",
+        service_installed,
+        Some("run: sudo bash install-dev.sh  (or reinstall the package)"),
+    );
+
     out!("");
     if all_ok {
         out!("All checks passed.");

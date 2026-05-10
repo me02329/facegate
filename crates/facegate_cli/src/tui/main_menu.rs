@@ -56,6 +56,7 @@ enum Action {
     Doctor,
     SudoToggle,
     SessionToggle,
+    WatchToggle,
     CameraTest,
     Enroll,
     AddSudo,
@@ -73,7 +74,7 @@ struct MenuItem {
     needs_user: bool,
 }
 
-fn build_items(sudo_enabled: bool, session_enabled: bool) -> Vec<MenuItem> {
+fn build_items(sudo_enabled: bool, session_enabled: bool, watch_active: bool) -> Vec<MenuItem> {
     let sudo_label: &'static str = if sudo_enabled {
         "Disable Sudo Auth"
     } else {
@@ -93,6 +94,16 @@ fn build_items(sudo_enabled: bool, session_enabled: bool) -> Vec<MenuItem> {
         "Remove face auth from login & screen unlock"
     } else {
         "Add face auth at login & screen unlock"
+    };
+    let watch_label: &'static str = if watch_active {
+        "Stop Watch Daemon"
+    } else {
+        "Start Watch Daemon"
+    };
+    let watch_desc = if watch_active {
+        "● Running — auto-unlock screen lock on face match"
+    } else {
+        "○ Stopped — enable auto-unlock (Windows Hello style)"
     };
     vec![
         MenuItem {
@@ -114,6 +125,13 @@ fn build_items(sudo_enabled: bool, session_enabled: bool) -> Vec<MenuItem> {
             label: session_label,
             description: session_desc.into(),
             action: Some(Action::SessionToggle),
+            needs_user: false,
+        },
+        MenuItem {
+            icon: "◎ ",
+            label: watch_label,
+            description: watch_desc.into(),
+            action: Some(Action::WatchToggle),
             needs_user: false,
         },
         MenuItem {
@@ -234,6 +252,7 @@ struct App<'a> {
     panel: PanelState,
     sudo_enabled: bool,
     session_enabled: bool,
+    watch_active: bool,
     /// When set, the loop exits and main re-opens the config TUI.
     open_config: bool,
     should_quit: bool,
@@ -243,9 +262,10 @@ impl<'a> App<'a> {
     fn new(config: &'a Config) -> Self {
         let sudo_enabled = commands::sudo_toggle::is_enabled();
         let session_enabled = commands::session_toggle::is_enabled();
+        let watch_active = commands::watch_toggle::is_active();
         App {
             config,
-            items: build_items(sudo_enabled, session_enabled),
+            items: build_items(sudo_enabled, session_enabled, watch_active),
             selected: 0,
             input_mode: InputMode::Menu,
             username_buf: String::new(),
@@ -264,6 +284,7 @@ impl<'a> App<'a> {
             panel: PanelState::Idle,
             sudo_enabled,
             session_enabled,
+            watch_active,
             open_config: false,
             should_quit: false,
         }
@@ -562,6 +583,11 @@ impl<'a> App<'a> {
                 Action::SessionToggle => {
                     commands::session_toggle::run_streaming(username.as_deref(), &extra, &[], &tx)
                 }
+                Action::WatchToggle => {
+                    // enable if currently inactive, disable if active
+                    let enable = !commands::watch_toggle::is_active();
+                    commands::watch_toggle::run_streaming(enable, &tx)
+                }
                 Action::CameraTest => commands::camera_test::run_streaming(&config, None, &tx),
                 Action::AddSudo => commands::add::run_streaming(
                     &config,
@@ -642,7 +668,8 @@ impl<'a> App<'a> {
         if matches!(self.panel, PanelState::Done { .. }) {
             self.sudo_enabled = commands::sudo_toggle::is_enabled();
             self.session_enabled = commands::session_toggle::is_enabled();
-            self.items = build_items(self.sudo_enabled, self.session_enabled);
+            self.watch_active = commands::watch_toggle::is_active();
+            self.items = build_items(self.sudo_enabled, self.session_enabled, self.watch_active);
             self.panel = PanelState::Idle;
         }
     }

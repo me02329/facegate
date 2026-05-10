@@ -1,6 +1,6 @@
 .TH FACEGATE 1 "May 2026" "Facegate 0.1.0" "User Commands"
 .SH NAME
-facegate \- facial authentication helper and diagnostics tool for Linux
+facegate \- native facial authentication for Linux, including automatic screen unlock
 .SH SYNOPSIS
 .SY facegate
 .RI [ --config " PATH" ]
@@ -54,13 +54,38 @@ facegate \- facial authentication helper and diagnostics tool for Linux
 .B facegate
 is the command line and interactive terminal interface for Facegate, a native
 Linux facial authentication stack backed by V4L2 cameras, ONNX Runtime face
-detection, ArcFace-compatible embeddings, and a PAM module.
+detection, ArcFace-compatible embeddings, a PAM module, and a D-Bus screen-lock
+daemon.
+.PP
+Facegate provides two complementary authentication paths:
+.TP
+.B PAM module
+.IR pam_facegate.so
+integrates with any PAM-aware service: sudo, su, login managers (SDDM, LightDM,
+GDM, greetd), and screen lockers that call PAM on form submission. The module
+spawns
+.B facegate auth
+as a subprocess and succeeds immediately if the face matches, then falls through
+to password authentication if it does not.
+.TP
+.B Watch daemon
+.B facegate-watch.service
+is a systemd user service that subscribes to the
+.B Lock
+signal on
+.IR org.freedesktop.login1.Session .
+The moment the screen locks, it opens the camera and begins recognising. On a
+successful match it calls the
+.B Unlock()
+D-Bus method on the session object directly \(em no keypress, no unlock form.
+If recognition fails or the user types their password first, the camera is
+released and the flow continues normally. This is architecturally equivalent to
+Windows Hello.
 .PP
 Running
 .B facegate
-without a command opens the interactive menu. The menu exposes configuration,
-installation diagnostics, camera testing, enrollment, template listing, and
-live recognition testing.
+without a subcommand opens the interactive TUI, which covers all configuration,
+enrollment, diagnostics, and service management.
 .PP
 The default configuration file is
 .IR /etc/facegate/config.toml .
@@ -70,35 +95,38 @@ is supplied.
 .SH COMMANDS
 .TP
 .B configure
-Open the interactive terminal configuration editor. Use this to adjust camera
-settings, recognition thresholds, model paths, storage paths, logging, and PAM
-fallback behavior. In the editor,
+Open the interactive terminal configuration editor. Adjust camera settings,
+recognition thresholds, model paths, storage paths, logging, and PAM fallback
+behavior. Press
 .B Esc
-returns to the previous screen and
+to return to the previous screen or
 .B q
-quits.
+to quit.
 .TP
 .B doctor
-Run installation diagnostics. This checks that the configuration file, PAM
-module, storage directory, camera device, ONNX models, and ONNX Runtime shared
-library are present.
+Run installation diagnostics. Checks the configuration file, PAM module,
+storage directory, camera device, ONNX models, ONNX Runtime shared library,
+and whether the
+.B facegate-watch.service
+unit file is installed.
 .TP
 .B camera-test
 Open the configured camera, negotiate a supported pixel format, capture one
-frame, load the detector model, and report whether a face was detected.
+frame, run the face detector, and report whether a face was detected.
 .RS
 .TP
 .BI --device " DEVICE"
-Override the configured camera device for this test only, for example
+Override the configured camera device for this run only, for example
 .IR /dev/video2 .
 .RE
 .TP
 .B add \fIUSERNAME\fR [\fB--label\fR \fILABEL\fR] [\fB--for\fR \fIsudo|session|both\fR]
-Enroll a face template for
+Enroll face templates for
 .IR USERNAME .
-This command usually requires root because templates are stored under
+Requires root. Templates are stored under
 .IR /var/lib/facegate/users .
-The optional label is stored with the template to help identify captures later.
+.PP
+.RS
 The default target is
 .BR sudo ,
 which requires
@@ -106,51 +134,83 @@ which requires
 to have sudo privileges.
 Use
 .B --for session
-for login/session authentication of non-sudo local users, or
+for login and screen-lock authentication, or
 .B --for both
-to enroll a sudo-capable user for both flows.
-Templates are scoped: session-only templates are not accepted for sudo
-authentication, and sudo-only templates are not accepted for login/session
-authentication.
+to cover all flows in a single enrollment.
+.PP
+Templates are scoped: a session-only template is rejected for sudo
+authentication and vice versa.
+.B --for both
+is accepted by all flows.
+.PP
+When enrolling with
+.B --for session
+or
+.BR --for both ,
+the template directory is automatically transferred to the ownership of
+.I USERNAME
+so that
+.B facegate-watch
+(which runs as the user, not as root) can read the templates at runtime.
+The files remain
+.B 0600
+\(em no other user can read them.
+.RE
 .TP
 .B session-auth
-Toggle Facegate in supported login/session PAM service files found on the
-system, such as
+Toggle
+.B pam_facegate.so
+in supported login/session PAM service files found on the system.
+Auto-detected services include
 .BR login ,
 .BR gdm-password ,
+.BR gdm3 ,
+.BR gdm ,
 .BR sddm ,
 .BR lightdm ,
 .BR greetd ,
+.BR kde ,
+.BR gnome-screensaver ,
+.BR swaylock ,
+.BR hyprlock ,
+.BR i3lock ,
+and
+.BR vlock .
+.PP
+.RS
+Additional service files can be specified with
+.B --pam-service
 or
-.BR kde .
+.BR --pam-file .
+After enabling, the output reminds you to also enable the watch daemon for
+automatic screen-lock unlock.
+.RE
 .TP
 .B list \fIUSERNAME\fR
 List enrolled templates for
 .IR USERNAME ,
-including template IDs and labels.
+including IDs, scopes, creation timestamps, and labels.
 .TP
 .B remove \fIUSERNAME\fR \fIID\fR
-Remove one enrolled template by ID. This command usually requires root.
+Remove one enrolled template by ID. Requires root.
 .TP
 .B test \fIUSERNAME\fR
-Capture a live face embedding and compare it against enrolled templates for
+Capture a live face embedding and compare it against all enrolled templates for
 .IR USERNAME .
-The command prints the best cosine similarity, the configured threshold, and
-the final ACCEPT or REJECT result.
+Prints the best cosine similarity score, the configured threshold, and an
+ACCEPT or REJECT result.
 .TP
 .B completions \fISHELL\fR
-Print shell completion scripts. Supported shells are the values accepted by
-Clap, typically
+Print shell completion scripts to stdout. Supported shells:
 .BR bash ,
 .BR zsh ,
 .BR fish ,
 .BR elvish ,
-and
 .BR powershell .
 .TP
-.B auth --user \fIUSERNAME\fR
-Internal command used by the PAM module. It is hidden from the normal help
-output and returns machine-readable exit codes. Users should normally run
+.B auth --user \fIUSERNAME\fR [\fB--service\fR \fISERVICE\fR]
+Internal command invoked by the PAM module. Hidden from normal help output.
+Returns machine-readable exit codes. Users should run
 .B test
 instead.
 .SH OPTIONS
@@ -166,6 +226,97 @@ Show command help.
 .TP
 .B -V, --version
 Show the Facegate version.
+.SH SCREEN LOCK DAEMON
+.SS Enabling the watch daemon
+After enrolling with
+.B --for session
+or
+.BR --for both ,
+enable the watch daemon once as your normal user:
+.PP
+.RS
+.EX
+systemctl --user enable --now facegate-watch
+.EE
+.RE
+.PP
+The service is declared
+.B WantedBy=graphical-session.target
+and will start automatically at every subsequent login.
+You can also toggle it from the Facegate TUI (select
+.BR "Watch Daemon" ).
+.SS How it works
+.IP 1. 4
+The daemon starts at login and connects to the system D-Bus.
+.IP 2. 4
+It retrieves the current session object path from
+.B org.freedesktop.login1.Manager.GetSession(\fIXDG_SESSION_ID\fP)
+and subscribes to the
+.B Lock
+and
+.B Unlock
+signals on that object.
+.IP 3. 4
+When the screen locks (
+.B Lock
+signal), the daemon opens the camera using the session ACLs that
+.B systemd-logind
+automatically grants to the active session owner via udev rules. No extra
+group membership is required.
+.IP 4. 4
+It runs the face recognition pipeline (load templates \(-> capture frame \(->
+embed \(-> cosine match) in a background thread, up to
+.B max_attempts
+times.
+.IP 5. 4
+On a successful match it calls
+.BR org.freedesktop.login1.Session.Unlock() .
+On timeout or repeated failure it releases the camera and lets the user
+authenticate normally.
+.IP 6. 4
+If the
+.B Unlock
+signal fires first (user typed their password), the daemon cancels any
+ongoing scan immediately and releases the camera.
+.SH PAM SETUP
+.SS Enabling via the TUI
+Run
+.B sudo facegate
+and select
+.B Sudo Auth
+to add or remove
+.B pam_facegate.so
+from
+.IR /etc/pam.d/sudo .
+Select
+.B Session Auth
+to toggle it for detected login/session services.
+.SS Manual setup
+Add the following line to the relevant PAM service file,
+.B before
+the existing
+.B auth
+lines:
+.PP
+.RS
+.EX
+auth      sufficient    pam_facegate.so
+.EE
+.RE
+.PP
+.B Warning:
+always keep a root shell open while editing PAM configuration. A broken PAM
+configuration can lock you out of
+.BR sudo ,
+login, or screen unlock.
+.SS Scope of PAM vs. the watch daemon
+The PAM module is called when the user initiates authentication: running
+.BR sudo ,
+pressing Login at SDDM, or submitting the unlock form. For fully automatic
+screen unlock (camera starts as soon as the screen locks, no user interaction),
+use the watch daemon instead. Both mechanisms can coexist: PAM provides a
+face-scan fallback even when the watch daemon is not running, while the daemon
+provides the no-keypress experience when it is.
 .SH CONFIGURATION
 The configuration file is TOML. The default path is:
 .PP
@@ -173,62 +324,63 @@ The configuration file is TOML. The default path is:
 .I /etc/facegate/config.toml
 .RE
 .PP
-Important sections include:
 .TP
 .B [camera]
-Camera device and capture settings. Common fields are
+Camera device and capture settings. Common fields:
 .BR device ,
 .BR width ,
 .BR height ,
 .BR fps ,
 .BR warmup_frames ,
-and
 .BR timeout_ms .
 .TP
 .B [recognition]
-Recognition policy. Important fields are
-.BR threshold ,
+Recognition policy:
+.BR threshold " (cosine similarity, higher = stricter),"
 .BR required_matches ,
 .BR max_attempts ,
-and
 .BR min_face_size .
-Higher thresholds reduce false accepts but may increase false rejects.
 .TP
 .B [models]
 Paths to the ONNX detector and embedder models. Defaults are under
 .IR /usr/share/facegate/models .
 .TP
 .B [storage]
-Template storage location. The default is
+Template storage directory. Default:
 .IR /var/lib/facegate/users .
 .TP
 .B [security]
-Authentication behavior, including whether PAM may fall back to password
-authentication when Facegate does not recognize a user.
+.BR allow_password_fallback " — whether PAM falls through to password auth on non-match (default: true)."
+.br
+.BR deny_on_camera_error " — whether a camera failure counts as auth failure (default: false, falls through)."
 .SH FILES
 .TP
 .I /usr/bin/facegate
 Facegate command line interface.
 .TP
 .I /usr/lib/security/pam_facegate.so
-PAM module.
+PAM module. Loaded by PAM at authentication time.
+.TP
+.I /usr/lib/systemd/user/facegate-watch.service
+systemd user service unit for the screen-lock watch daemon.
 .TP
 .I /etc/facegate/config.toml
 Default configuration file.
 .TP
 .I /usr/share/facegate/models/scrfd_500m.onnx
-Default face detector model.
+Default face detector model (SCRFD 500M).
 .TP
 .I /usr/share/facegate/models/arcface_w600k_r50.onnx
-Default face embedding model.
+Default face embedding model (ArcFace W600K R50).
 .TP
-.I /var/lib/facegate/users/USERNAME/embeddings.json
-Stored templates for a user.
+.I /var/lib/facegate/users/\fIUSERNAME\fP/embeddings.json
+Stored face templates for a user. Permissions: 0600, owned by
+.IR USERNAME .
 .SH EXAMPLES
 .TP
 Open the interactive menu:
 .EX
-facegate
+sudo facegate
 .EE
 .TP
 Check the installation:
@@ -241,14 +393,14 @@ Test the configured camera:
 sudo facegate camera-test
 .EE
 .TP
-Test another camera device:
+Test a specific camera device:
 .EX
 sudo facegate camera-test --device /dev/video2
 .EE
 .TP
-Enroll the current user:
+Enroll the current user for all auth flows:
 .EX
-sudo facegate add "$USER" --for both --label normal
+sudo facegate add "$USER" --for both
 .EE
 .TP
 List enrolled templates:
@@ -261,41 +413,169 @@ Run a live recognition test:
 sudo facegate test "$USER"
 .EE
 .TP
+Enable PAM for login and screen lock services:
+.EX
+sudo facegate session-auth
+.EE
+.TP
+Enable the screen-lock watch daemon (as your normal user):
+.EX
+systemctl --user enable --now facegate-watch
+.EE
+.TP
+Check whether the daemon is running:
+.EX
+systemctl --user status facegate-watch
+.EE
+.TP
 Generate zsh completions:
 .EX
 facegate completions zsh
 .EE
-.SH PAM SETUP
-Facegate is intended to be used from PAM through
-.IR pam_facegate.so .
-A typical PAM line is:
-.PP
-.RS
-.EX
-auth      sufficient    pam_facegate.so
-.EE
-.RE
-.PP
-Always keep a root shell open while editing PAM configuration. A broken PAM
-configuration can lock you out of
-.BR sudo ,
-login, or screen unlock flows.
 .SH SECURITY NOTES
-Facegate is a convenience authentication mechanism. It should not be treated as
-equivalent to hardware-backed authentication, FIDO2, smartcards, or a strong
-password. Camera-based recognition can be affected by lighting, pose, camera
-quality, model behavior, and presentation attacks.
+.SS General posture
+Facegate is a
+.B convenience authentication mechanism.
+It is designed to reduce friction for everyday operations \(em unlocking your
+screen, running sudo \(em without replacing the security of a strong password.
+Password authentication always remains available unless you explicitly set
+.B allow_password_fallback\ =\ false
+in the configuration.
 .PP
-For safer deployments, keep password fallback enabled while testing, enroll
-multiple templates under realistic lighting conditions, use conservative
-thresholds, and ensure template files remain writable only by root.
+Facegate does not implement liveness detection. A high-quality photograph of the
+enrolled user may fool the recognition pipeline depending on the camera, model,
+and threshold setting. For high-security contexts, treat face auth as a
+convenience first factor and do not disable password fallback.
+.SS No network, no cloud
+All processing happens on the local machine. Face detection and embedding
+extraction run entirely within ONNX Runtime. No image, embedding, biometric
+hash, or identity data is ever sent over the network. There is no telemetry,
+no licensing server, and no cloud dependency.
+.SS Template storage
+ArcFace templates are 512-dimensional floating-point vectors derived from face
+images. They are not photographs and cannot be used to reconstruct a face.
+.PP
+Templates are stored in
+.IR /var/lib/facegate/users/USERNAME/embeddings.json
+with
+.B 0600
+permissions owned by
+.IR USERNAME .
+Root performs enrollment (writing templates) and immediately transfers ownership
+to the enrolled user for session-auth flows. All writes are atomic: Facegate
+writes to a temporary file, calls
+.BR fsync (2),
+and renames it over the destination so that no partial state can persist across
+a power failure. Symlink traversal is blocked on every file operation.
+.SS PAM module design
+.IR pam_facegate.so
+is deliberately minimal. It does not link ONNX Runtime, does not load models,
+and does not open the camera. When called by PAM, it sends an informational
+message through the application's conversation function, then spawns
+.B /usr/bin/facegate auth --user NAME
+as a subprocess and reads its exit code. A hard timeout of 45 seconds ensures
+PAM is never blocked indefinitely. The subprocess approach keeps the security
+surface of the PAM module small and makes it independently auditable.
+.SS Watch daemon attack surface
+.B facegate-watch
+has no listening socket of any kind. It cannot be reached over the network,
+over a Unix domain socket, or through any other IPC mechanism. Its only input
+channel is D-Bus signals received from the system bus.
+.PP
+.B D-Bus signal authenticity.
+The
+.B Lock
+and
+.B Unlock
+signals that trigger or cancel a recognition scan are emitted by
+.IR org.freedesktop.login1 ,
+the well-known service name owned exclusively by systemd-logind (root process).
+The system D-Bus daemon enforces exclusive name ownership: no unprivileged
+process can claim or impersonate this name. Signal sender identity is verified
+using kernel socket credentials
+.RB ( SO_PEERCRED ),
+which cannot be spoofed from user space. A process running as a different user,
+or even as root in a different context, cannot inject a fake
+.B Lock
+signal that would cause the daemon to start a scan.
+.PP
+.B Unlocking.
+When a face matches, the daemon calls
+.B org.freedesktop.login1.Session.Unlock()
+on the D-Bus object for the current session. polkit authorises this call
+because the caller is the owner of the session (same UID, same
+.BR XDG_SESSION_ID ).
+A process in a different session or running under a different UID cannot call
+.B Unlock()
+on someone else's session.
+.PP
+.B Camera access.
+The daemon runs as the logged-in user within their active logind session.
+systemd-logind and udev automatically grant the active session owner access to
+.I /dev/video*
+through filesystem ACLs at session activation time. Membership in the
+.B video
+group is
+.B not
+required and is
+.B not
+added by Facegate. This is the standard Linux session-device permission model,
+the same one used by PipeWire and other session-aware daemons.
+.PP
+.B Same-UID attacker.
+If an attacker already has code execution as the same user, the session is
+fully compromised regardless of Facegate. They already have read access to the
+template file, camera access, and the ability to call
+.B Unlock()
+themselves. The daemon adds no new attack surface in this scenario.
+.SS Comparison with Windows Hello
+Windows Hello uses
+.BR WinBioSvc ,
+a service running as
+.B SYSTEM
+with exclusive access to the IR camera. No user process can touch the camera
+hardware for authentication purposes.
+.PP
+Facegate\(aqs watch daemon achieves an equivalent separation: it is a distinct
+process that reacts to a system event (the D-Bus
+.B Lock
+signal), camera access is mediated by logind session ACLs rather than group
+membership, and the user\(aqs password is never involved in the face-recognition
+path. The daemon runs in the user\(aqs own session rather than as SYSTEM, which
+is why it can access session resources (camera, D-Bus session socket) without
+elevated privileges and without bypassing the Wayland portal model.
+.SS Recommendations
+.IP \(bu 4
+Keep
+.B allow_password_fallback\ =\ true
+while testing and in all production deployments unless you have a specific reason
+to disable it. Face recognition can fail under poor lighting, camera failure, or
+model limitations; the password is always the safety net.
+.IP \(bu 4
+Enroll multiple samples (3 or more) under realistic lighting conditions.
+.IP \(bu 4
+Use a threshold of 0.55 or higher to reduce false accept risk.
+.IP \(bu 4
+Do not share enrolled templates between users or machines \(em each enrollment
+is specific to the camera, lighting environment, and individual.
+.IP \(bu 4
+If someone else's face repeatedly triggers recognition, increase the threshold
+or re-enroll.
+.IP \(bu 4
+Always keep a root shell open when modifying PAM configuration.
 .SH EXIT STATUS
 .B facegate
 returns zero on successful user-facing commands and non-zero on errors.
+.PP
 The hidden
 .B auth
-command uses fixed exit codes consumed by the PAM module.
+subcommand returns fixed codes consumed by the PAM module:
+0 (face recognised), 1 (not recognised, fall through), 6 (access denied), and
+non-zero for internal errors.
 .SH SEE ALSO
 .BR pam (8),
 .BR sudo (8),
-.BR v4l2-ctl (1)
+.BR systemctl (1),
+.BR loginctl (1),
+.BR v4l2-ctl (1),
+.BR org.freedesktop.login1 (5)

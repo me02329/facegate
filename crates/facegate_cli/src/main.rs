@@ -61,6 +61,9 @@ enum Command {
         #[arg(long)]
         service: Option<String>,
     },
+    /// Watch for session lock events and unlock via face recognition (run as user)
+    #[command(hide = true)]
+    Watch,
     /// Print shell completion script to stdout
     Completions {
         #[arg(value_enum)]
@@ -88,6 +91,7 @@ impl From<EnrollmentPurpose> for commands::add::EnrollmentTarget {
 fn main() {
     let cli = Cli::parse();
     let auth_mode = matches!(&cli.command, Some(Command::Auth { .. }));
+    let watch_mode = matches!(&cli.command, Some(Command::Watch));
 
     if let Some(Command::Completions { shell }) = cli.command {
         generate(
@@ -99,9 +103,9 @@ fn main() {
         return;
     }
 
-    // Auth is called internally by the PAM module (already root). Every other
-    // command touches sensitive face data or system config, so we require root.
-    if !auth_mode {
+    // Auth and watch run as an unprivileged user. Every other command touches
+    // sensitive face data or system config, so we require root.
+    if !auth_mode && !watch_mode {
         // SAFETY: geteuid() is always safe to call.
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("Error: facegate must be run as root (e.g. sudo facegate).");
@@ -116,6 +120,15 @@ fn main() {
 
     if !auth_mode {
         init_logging(&config.logging.level);
+    }
+    if watch_mode {
+        // Re-init logging with a format suited to a daemon (no colour, with timestamps).
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ort=warn"));
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .try_init();
     }
     let config_path = cli.config.clone();
 
@@ -173,6 +186,7 @@ fn config_policy(command: &Option<Command>) -> ConfigPolicy {
     match command {
         Some(Command::Auth { .. }) => ConfigPolicy::StrictSilent,
         Some(Command::Configure) | Some(Command::Doctor) | None => ConfigPolicy::DefaultOnError,
+        Some(Command::Watch) => ConfigPolicy::DefaultOnError,
         _ => ConfigPolicy::Strict,
     }
 }
@@ -228,6 +242,7 @@ fn run_command(
         Command::Auth { user, service } => {
             std::process::exit(commands::auth::run(&config, &user, service.as_deref()) as i32);
         }
+        Command::Watch => commands::watch::run(config),
         Command::Completions { .. } => unreachable!(),
     }
 }

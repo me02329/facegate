@@ -104,6 +104,16 @@ pub fn run_streaming(
     out!("  {PAM_LINE}");
     out!("");
     out!("Keep a root shell open while testing login/session authentication.");
+    out!("");
+    if enable {
+        out!("Screen-lock auto-unlock (Windows Hello style) requires the watch daemon.");
+        out!("Enable it once as your normal user:");
+        out!("  systemctl --user enable --now facegate-watch");
+        out!("It will start automatically at every login.");
+    } else {
+        out!("To also stop the screen-lock daemon:");
+        out!("  systemctl --user disable --now facegate-watch");
+    }
 
     Ok(())
 }

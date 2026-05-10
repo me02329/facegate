@@ -1,0 +1,21 @@
+[Unit]
+Description=Facegate face-recognition screen-unlock daemon
+Documentation=man:facegate(1)
+# Start after the graphical session is established so the camera and D-Bus
+# session are available.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/facegate watch
+Restart=on-failure
+RestartSec=5
+
+# The daemon must stay within the user session so it can reach
+# org.freedesktop.login1 via the system bus and read the camera device through
+# logind's automatic udev ACLs.  No extra capabilities or group membership
+# (e.g. "video") are needed.
+
+[Install]
+WantedBy=graphical-session.target

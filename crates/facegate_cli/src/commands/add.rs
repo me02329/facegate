@@ -122,6 +122,14 @@ pub fn run_streaming(
         );
     }
 
+    // The facegate-watch daemon runs as the user (not root). Chown the template
+    // directory and file so the daemon can read them. Ownership is transferred
+    // to the user; root writes on re-enrollment will be corrected by the next
+    // chown call, so this is always safe to repeat.
+    if matches!(target, EnrollmentTarget::Session | EnrollmentTarget::Both) {
+        chown_user_data_dir(username, &config.storage.base_dir)?;
+    }
+
     out!("");
     out!("Done — {samples} template(s) enrolled for '{username}'.");
     Ok(())
@@ -146,6 +154,47 @@ fn ask_sample_count() -> anyhow::Result<u32> {
         Ok(n) if (1..=10).contains(&n) => Ok(n),
         _ => bail!("invalid number of samples '{trimmed}': expected 1-10"),
     }
+}
+
+/// Transfers ownership of the user's template directory and `embeddings.json`
+/// to the enrolled user so that `facegate-watch` (which runs as the user, not
+/// root) can read the templates.  Permissions stay at 0700/0600 — only the
+/// owner changes, so no other user gains access.
+fn chown_user_data_dir(username: &str, base_dir: &std::path::Path) -> anyhow::Result<()> {
+    let c_name = std::ffi::CString::new(username)
+        .map_err(|_| anyhow::anyhow!("invalid username '{username}'"))?;
+    // SAFETY: getpwnam is thread-safe with respect to our single-threaded use here.
+    let uid = unsafe {
+        let pw = libc::getpwnam(c_name.as_ptr());
+        if pw.is_null() {
+            bail!("cannot resolve UID for '{username}'");
+        }
+        (*pw).pw_uid
+    };
+    // -1 (all bits set) means "leave gid unchanged" in POSIX chown.
+    let keep_gid = u32::MAX;
+
+    let user_dir = base_dir.join(username);
+    for path in [
+        user_dir.clone(),
+        user_dir.join("embeddings.json"),
+    ] {
+        if !path.exists() {
+            continue;
+        }
+        let c_path = std::ffi::CString::new(path.to_str().unwrap_or(""))
+            .map_err(|_| anyhow::anyhow!("non-UTF-8 path: {}", path.display()))?;
+        // SAFETY: chown with a valid CString path and numeric uid/gid is safe.
+        let ret = unsafe { libc::chown(c_path.as_ptr(), uid, keep_gid) };
+        if ret != 0 {
+            bail!(
+                "chown {username} {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn require_root() -> anyhow::Result<()> {
