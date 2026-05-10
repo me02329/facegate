@@ -23,8 +23,6 @@ Facegate lets you authenticate with your face for `sudo`, login sessions, and sc
 
 ---
 
-<img width="878" height="224" alt="image" src="https://github.com/user-attachments/assets/46d59493-be2a-4ab3-b6b4-3409f98106c4" />
-
 ---
 
 ## Requirements
