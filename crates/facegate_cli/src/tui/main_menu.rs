@@ -769,48 +769,42 @@ fn handle_key(app: &mut App, code: KeyCode) {
             _ => {}
         },
         InputMode::SessionServiceSelect => match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if app.session_cursor > 0 {
+            KeyCode::Up | KeyCode::Char('k')
+                if app.session_cursor > 0 => {
                     app.session_cursor -= 1;
                 }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if app.session_cursor + 1 < app.session_entries.len() {
+            KeyCode::Down | KeyCode::Char('j')
+                if app.session_cursor + 1 < app.session_entries.len() => {
                     app.session_cursor += 1;
                 }
-            }
             KeyCode::Char(' ') => app.toggle_session_entry(),
             KeyCode::Enter => app.confirm_session_services(),
             KeyCode::Esc => app.cancel_input(),
             _ => {}
         },
         InputMode::TemplateList => match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if app.template_cursor > 0 {
+            KeyCode::Up | KeyCode::Char('k')
+                if app.template_cursor > 0 => {
                     app.template_cursor -= 1;
                 }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if app.template_cursor + 1 < app.template_entries.len() {
+            KeyCode::Down | KeyCode::Char('j')
+                if app.template_cursor + 1 < app.template_entries.len() => {
                     app.template_cursor += 1;
                 }
-            }
             KeyCode::Char(' ') | KeyCode::Char('d') => app.toggle_template_mark(),
             KeyCode::Enter => app.confirm_template_delete(),
             KeyCode::Esc => app.cancel_input(),
             _ => {}
         },
         InputMode::EnrollTargetSelect => match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if app.enroll_cursor > 0 {
+            KeyCode::Up | KeyCode::Char('k')
+                if app.enroll_cursor > 0 => {
                     app.enroll_cursor -= 1;
                 }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if app.enroll_cursor < 2 {
+            KeyCode::Down | KeyCode::Char('j')
+                if app.enroll_cursor < 2 => {
                     app.enroll_cursor += 1;
                 }
-            }
             KeyCode::Char(' ') => app.toggle_enroll_target(),
             KeyCode::Enter => app.confirm_enroll_targets(),
             KeyCode::Esc => app.cancel_input(),
