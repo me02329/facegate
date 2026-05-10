@@ -36,5 +36,9 @@ contents:
     file_info:
       mode: 0644
 
+archlinux:
+  pkgbase: facegate
+  packager: Facegate maintainers
+
 scripts:
   postinstall: packaging/nfpm/scripts/postinstall.sh

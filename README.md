@@ -35,10 +35,14 @@ Everything else (ONNX Runtime, face recognition models) is downloaded automatica
 
 Download the package for your distribution from the latest GitHub Release:
 
+- Arch Linux: `facegate-<version>-1-x86_64.pkg.tar.zst`
 - Debian / Ubuntu: `facegate_<version>_amd64.deb`
 - Fedora / openSUSE / RPM-based: `facegate-<version>.x86_64.rpm`
 
 ```bash
+# Arch Linux
+sudo pacman -U ./facegate-<version>-1-x86_64.pkg.tar.zst
+
 # Debian / Ubuntu
 sudo apt install ./facegate_<version>_amd64.deb
 

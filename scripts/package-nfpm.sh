@@ -12,7 +12,9 @@ export FACEGATE_VERSION="$version"
 cargo build --release
 
 mkdir -p dist
-nfpm package --config packaging/nfpm/facegate.yaml --packager deb --target "dist/facegate_${version}_amd64.deb"
-nfpm package --config packaging/nfpm/facegate.yaml --packager rpm --target "dist/facegate-${version}.x86_64.rpm"
+nfpm package --config packaging/nfpm/facegate.yaml --packager deb      --target "dist/facegate_${version}_amd64.deb"
+nfpm package --config packaging/nfpm/facegate.yaml --packager rpm      --target "dist/facegate-${version}.x86_64.rpm"
+nfpm package --config packaging/nfpm/facegate.yaml --packager archlinux --target "dist/facegate-${version}-1-x86_64.pkg.tar.zst"
 
 echo "Built packages in dist/"
+ls -lh dist/
