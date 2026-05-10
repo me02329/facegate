@@ -1,18 +1,19 @@
 # Facegate
 
-**Native facial authentication for Linux.**
+**Native facial authentication for Linux — including automatic screen unlock.**
 
-Facegate is a PAM module and CLI tool that lets you unlock `sudo`, login sessions, and any PAM-aware service using your webcam. It runs entirely on-device — no cloud, no network, no external dependencies beyond a V4L2 camera and the ONNX Runtime.
+Facegate lets you authenticate with your face for `sudo`, login sessions, and screen lock. It runs entirely on-device: no cloud, no network, no telemetry. The ML pipeline (SCRFD face detection + ArcFace embeddings) runs locally via ONNX Runtime.
 
 ---
 
 ## Features
 
-- Face authentication via a standard Linux PAM module (`pam_facegate.so`)
-- Interactive TUI to configure, enroll faces, run diagnostics, and toggle sudo auth
+- **Automatic screen unlock** — a background daemon watches for the lock signal via D-Bus and unlocks the screen as soon as your face is recognised, with no keypress required (Windows Hello style)
+- Face authentication via a standard Linux PAM module (`pam_facegate.so`) for `sudo`, `su`, and login managers (SDDM, LightDM, GDM, greetd)
+- Interactive TUI to configure, enroll faces, run diagnostics, and manage all auth modes
 - Multi-sample enrollment with separate templates per capture for better accuracy
-- ArcFace embeddings + SCRFD face detector (ONNX Runtime)
-- Secure template storage: root-only, atomic writes, no symlink traversal
+- ArcFace embeddings + SCRFD face detector (ONNX Runtime, fully on-device)
+- Template storage scoped per auth target (sudo vs. session)
 - Password fallback configurable per PAM service
 - Shell completions for bash, zsh, fish
 
@@ -20,8 +21,9 @@ Facegate is a PAM module and CLI tool that lets you unlock `sudo`, login session
 
 ## Requirements
 
-- Linux with V4L2 camera (`/dev/video*`)
+- Linux with a V4L2 camera (`/dev/video*`)
 - Root access for installation and enrollment
+- systemd (for the screen-lock watch daemon)
 
 Everything else (ONNX Runtime, face recognition models) is downloaded automatically by the install script.
 
@@ -34,9 +36,7 @@ Everything else (ONNX Runtime, face recognition models) is downloaded automatica
 Download the package for your distribution from the latest GitHub Release:
 
 - Debian / Ubuntu: `facegate_<version>_amd64.deb`
-- Fedora / openSUSE / RPM-based systems: `facegate-<version>.x86_64.rpm`
-
-Then install it with your system package manager:
+- Fedora / openSUSE / RPM-based: `facegate-<version>.x86_64.rpm`
 
 ```bash
 # Debian / Ubuntu
@@ -49,17 +49,18 @@ sudo dnf install ./facegate-<version>.x86_64.rpm
 sudo zypper install ./facegate-<version>.x86_64.rpm
 ```
 
-After installation, install or verify ONNX Runtime and the face models, then run:
+After installation:
 
 ```bash
-sudo facegate doctor
-sudo facegate camera-test
+sudo facegate doctor        # verify everything is in place
+sudo facegate camera-test   # confirm the camera works
 ```
 
-The packaged install creates the system paths used by Facegate:
+The packaged install creates:
 
 - `/usr/bin/facegate`
 - `/usr/lib/security/pam_facegate.so`
+- `/usr/lib/systemd/user/facegate-watch.service`
 - `/etc/facegate/config.toml`
 - `/usr/share/facegate/models/`
 - `/var/lib/facegate/users/`
@@ -74,79 +75,85 @@ cargo build --release
 sudo bash install-dev.sh
 ```
 
-The development install script:
-- Copies `facegate` to `/usr/bin/facegate`
-- Installs `pam_facegate.so` to `/usr/lib/security/`
-- Creates `/etc/facegate/`, `/usr/share/facegate/models/`, `/var/lib/facegate/users/`
-- Installs the config, man page, and shell completions
-- Downloads ONNX Runtime (~10 MB) if not already present — skip with `--skip-ort`
-- Downloads face recognition models (~400 MB) if not already present — skip with `--skip-models`
+The install script copies the binary, PAM module, systemd unit, config, man page, and shell completions, and downloads ONNX Runtime and face models if not already present. Use `--skip-ort` or `--skip-models` to skip downloads.
 
 ### Building Packages
-
-Release packages are produced by CI and attached to GitHub Releases. To build
-the same `.deb` and `.rpm` artifacts locally, install nFPM and run:
 
 ```bash
 FACEGATE_VERSION=0.1.0 scripts/package-nfpm.sh
 ```
 
-This creates packages in `dist/`.
+This produces `.deb` and `.rpm` packages in `dist/`.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Open the interactive menu (requires root)
+# 1. Open the interactive menu (requires root)
 sudo facegate
 
-# Or use subcommands directly:
-sudo facegate doctor                        # check installation
-sudo facegate add $USER                     # enroll your face
-sudo facegate test $USER                    # verify recognition works
+# Or step by step:
+sudo facegate doctor                         # verify installation
+sudo facegate add $USER --for both           # enroll your face
+sudo facegate test $USER                     # verify recognition
+sudo facegate session-auth                   # enable PAM for login & screen lock
+systemctl --user enable --now facegate-watch # start the auto-unlock daemon
 ```
 
 ---
 
-## CLI Reference
+## How Screen Unlock Works
+
+Facegate uses two complementary mechanisms:
+
+### 1. PAM module — for sudo and login managers
 
 ```
-facegate [--config PATH] [COMMAND]
+sudo / SDDM / LightDM / GDM
+  └─→ PAM
+       └─→ pam_facegate.so
+            └─→ facegate auth --user <name>  (subprocess)
+                 └─→ ONNX Runtime (on-device)
 ```
 
-| Command | Description |
-|---|---|
-| *(none)* | Open the interactive TUI menu |
-| `configure` | Edit settings in a terminal UI |
-| `doctor` | Check installation status |
-| `camera-test [--device DEV]` | Test camera and face detection |
-| `add USERNAME [--label LABEL] [--for sudo\|session\|both]` | Enroll face templates for a user |
-| `list USERNAME` | List enrolled templates |
-| `remove USERNAME ID` | Remove a template by ID |
-| `test USERNAME` | Live recognition test |
-| `session-auth` | Toggle face authentication for login/session PAM services |
-| `completions SHELL` | Print shell completion script |
+The PAM module is called when the user initiates authentication — for example, when running `sudo` or pressing Login at the SDDM screen. If the face matches, PAM succeeds immediately; otherwise it falls through to the next module (password, if fallback is enabled).
 
-All commands except `completions` require root.
+The PAM module spawns `facegate auth` as a separate subprocess so the module itself carries no ML dependencies and remains small and auditable.
+
+### 2. Watch daemon — for screen lock (Windows Hello style)
+
+```
+logind
+  └─→ Lock signal (D-Bus)
+       └─→ facegate-watch (user daemon)
+            └─→ opens camera via logind session ACLs
+            └─→ face recognised → loginctl unlock-session
+```
+
+`facegate-watch` is a systemd user service that subscribes to `org.freedesktop.login1.Session.Lock` on the system D-Bus. The moment the screen locks, it opens the camera and starts recognising. If the face matches, it calls `org.freedesktop.login1.Session.Unlock()` directly — no keypress needed.
+
+If recognition fails or times out, the daemon stops the camera and lets the user type their password normally. If the user types their password first (the `Unlock` signal fires), any ongoing scan is cancelled immediately.
+
+**This is architecturally equivalent to Windows Hello:** a dedicated process reacts to a system event, the user never needs to interact with an unlock form, and the camera is released as soon as a decision is made.
 
 ---
 
 ## Enrollment
 
-When enrolling, Facegate first verifies that the target name is a real Unix
-user. By default, enrollment targets sudo authentication and also verifies that
-the user has sudo privileges. For login/session authentication, use
-`--for session`. To enroll once for both sudo and session authentication, use
-`--for both`.
+Templates are scoped to their authentication target.
 
-Templates are scoped. A `--for session` template is not accepted for sudo
-authentication, while a `--for sudo` template is not accepted for login/session
-authentication. `--for both` intentionally allows both flows.
+```bash
+sudo facegate add $USER --for sudo     # for sudo / su only
+sudo facegate add $USER --for session  # for login manager + screen lock
+sudo facegate add $USER --for both     # for all flows (recommended for most users)
+```
 
-Facegate then asks how many samples to capture (1–10, default 3). Each sample
-is saved as a separate template, which improves recognition across varying poses
-and lighting conditions.
+Sudo-scoped templates are rejected for session auth and vice versa. `--for both` covers all flows with a single enrollment.
+
+Facegate prompts for the number of samples to capture (1–10, default 3). Each sample is stored as a separate template, improving accuracy across varying poses and lighting.
+
+When enrolling with `--for session` or `--for both`, the template directory is automatically `chown`ed to the enrolled user so that `facegate-watch` (which runs as the user, not as root) can read the templates.
 
 ```
 $ sudo facegate add mart --for both
@@ -155,11 +162,9 @@ How many samples do you want to capture? [1-10, default 3]: 3
 Enrolling sudo+session face for 'mart' (label: 'mart', 3 sample(s))
 Opening camera and loading models...
 
-Sample 1/3 — look at the camera, then press Enter...
+Sample 1/3 — position yourself in front of the camera, then press Enter...
 Capturing (timeout: 5000ms)...
   ✓ template #0 saved (label: 'mart-1')
-
-Sample 2/3 — look at the camera, then press Enter...
 ...
 Done — 3 template(s) enrolled for 'mart'.
 ```
@@ -168,18 +173,17 @@ Done — 3 template(s) enrolled for 'mart'.
 
 ## PAM Setup
 
-### Enable via the TUI (recommended)
+### Via the TUI (recommended)
 
-Run `sudo facegate` and select **Sudo Auth** to toggle face authentication for `sudo` on/off. The menu shows the current state and updates immediately.
+Run `sudo facegate` and use the interactive menu:
 
-Run `sudo facegate session-auth` or select **Session Auth** in the TUI to toggle
-Facegate for supported login/session PAM services found on the system, such as
-`login`, `gdm-password`, `sddm`, `lightdm`, `greetd`, or `kde`. Session auth can
-be used by non-sudo local users enrolled with `facegate add USER --for session`.
+- **Sudo Auth** — toggle `pam_facegate.so` in `/etc/pam.d/sudo` (and `sudo-i`)
+- **Session Auth** — toggle `pam_facegate.so` in detected login/session PAM services (SDDM, LightDM, GDM, greetd, `login`, `kde`, …)
+- **Watch Daemon** — enable/disable `facegate-watch.service` for automatic screen unlock
 
 ### Manual setup
 
-Add the following line to `/etc/pam.d/sudo` (or any other PAM service) **before** the existing `auth` lines:
+Add the following line **before** the existing `auth` lines in any PAM service file:
 
 ```
 auth      sufficient    pam_facegate.so
@@ -187,19 +191,40 @@ auth      sufficient    pam_facegate.so
 
 > **Warning:** Always keep a root shell open while editing PAM configuration. A broken PAM config can lock you out of `sudo` and login.
 
-### How it works
+Enable the watch daemon as your normal user:
 
-```
-sudo  →  PAM  →  pam_facegate.so  →  /usr/bin/facegate auth --user <name>  →  ONNX Runtime
+```bash
+systemctl --user enable --now facegate-watch
 ```
 
-The PAM module spawns `facegate auth` as a subprocess to keep the module itself free of ML dependencies. If the face is recognized, PAM succeeds immediately. If not, it falls through to the next PAM module (usually password auth, if fallback is enabled).
+### Supported session PAM services
+
+`session-auth` auto-detects: `login`, `gdm-password`, `gdm3`, `gdm`, `sddm`, `lightdm`, `greetd`, `kde`, `gnome-screensaver`, `swaylock`, `hyprlock`, `i3lock`, `vlock`.
+
+---
+
+## CLI Reference
+
+| Command | Description |
+|---|---|
+| *(none)* | Open the interactive TUI menu |
+| `configure` | Edit settings in a terminal UI |
+| `doctor` | Check installation status |
+| `camera-test [--device DEV]` | Test camera and face detection |
+| `add USERNAME [--label LABEL] [--for sudo\|session\|both]` | Enroll face templates |
+| `list USERNAME` | List enrolled templates |
+| `remove USERNAME ID` | Remove a template by ID |
+| `test USERNAME` | Live recognition test |
+| `session-auth` | Toggle face auth in login/session PAM services |
+| `completions SHELL` | Print shell completion script |
+
+All commands except `completions` require root. The `watch` subcommand (used by the systemd service) runs as the normal user.
 
 ---
 
 ## Configuration
 
-The default config file is `/etc/facegate/config.toml`. Edit it with `sudo facegate configure` or directly.
+`/etc/facegate/config.toml` — edit with `sudo facegate configure` or directly.
 
 ```toml
 [camera]
@@ -240,29 +265,81 @@ log_failed_attempts = true
 facegate/
 ├── crates/
 │   ├── facegate_core/   # camera, detection, embedding, matching, storage, config
-│   ├── facegate_cli/    # CLI + TUI (facegate binary)
+│   ├── facegate_cli/    # CLI + TUI + watch daemon (facegate binary)
 │   └── pam_facegate/    # PAM module (pam_facegate.so)
+├── systemd/
+│   └── facegate-watch.service
 ├── docs/
-│   └── facegate.1       # man page
-└── install-dev.sh       # install script
+│   └── facegate.1
+└── install-dev.sh
 ```
 
-**`facegate_core`** handles all the ML pipeline: V4L2 capture, SCRFD detection, ArcFace embedding extraction, cosine similarity matching, and secure template storage.
+**`facegate_core`** handles the full ML pipeline: V4L2 capture, SCRFD face detection, ArcFace embedding extraction, cosine similarity matching, and secure template storage.
 
-**`facegate_cli`** provides the `facegate` binary with a Clap CLI and a Ratatui TUI. The TUI covers enrollment, testing, configuration, diagnostics, and the sudo PAM toggle.
+**`facegate_cli`** provides the `facegate` binary with a Clap CLI and a Ratatui TUI. It also implements the `watch` subcommand — the D-Bus daemon used by the systemd service.
 
-**`pam_facegate`** is a minimal cdylib that implements `pam_sm_authenticate`. It delegates authentication to `facegate auth --user <name>` to avoid loading ONNX Runtime inside the PAM process.
+**`pam_facegate`** is a minimal cdylib that implements `pam_sm_authenticate`. It spawns `facegate auth` as a subprocess so the PAM module itself carries no ML or async dependencies, making it small and auditable.
 
 ---
 
-## Security Notes
+## Security
 
-- All commands require root — this prevents unprivileged enrollment attacks
-- Template files are stored with `0600` permissions under `/var/lib/facegate/users/`
+### What Facegate is
+
+Facegate is a **convenience authentication mechanism**. It is designed to reduce friction for everyday operations — unlocking your screen, running `sudo` — without replacing the security of a strong password. Password authentication remains available at all times (unless you explicitly disable fallback).
+
+### What it is not
+
+- It is not a replacement for hardware-backed authentication (TPM, FIDO2, smartcard).
+- It does not implement liveness detection. A high-quality photograph of the enrolled user could theoretically fool the camera depending on the model and threshold. For high-security scenarios, keep face auth as a first factor and require password confirmation for sensitive operations.
+
+### No network, no cloud
+
+All processing happens on your machine. Face embeddings are computed locally by ONNX Runtime. No image, embedding, or identity data is ever sent over the network. There is no telemetry.
+
+### Template storage
+
+Face templates are stored as ArcFace embedding vectors — 512 floating-point numbers that represent a mathematical fingerprint of a face. They are not photographs and cannot be used to reconstruct a face image.
+
+- Templates are stored under `/var/lib/facegate/users/<username>/embeddings.json`
+- Permissions: `0600` (readable only by the file owner)
+- Enrollment (root) writes the file and immediately `chown`s it to the enrolled user for session-auth flows
+- All writes are atomic (write to `.tmp`, `fsync`, `rename`) — no partial state on power loss
 - Symlink traversal is blocked on all file operations
-- Face recognition is a convenience mechanism, not a replacement for strong authentication
-- Keep `allow_password_fallback = true` while testing and under degraded conditions (poor lighting, camera failure)
-- Enroll multiple samples under realistic conditions for best accuracy
+
+### PAM module
+
+`pam_facegate.so` is deliberately minimal. It does not link ONNX Runtime, does not load models, and does not open the camera. It spawns `/usr/bin/facegate auth --user <name>` as a subprocess and interprets its exit code. A 45-second hard timeout ensures PAM is never blocked indefinitely regardless of what happens to the subprocess.
+
+### Watch daemon attack surface
+
+`facegate-watch` has no listening socket of any kind — it cannot be reached over the network or via a local Unix socket. Its only input is D-Bus signals from the system bus.
+
+**D-Bus signal authenticity.** The `Lock` and `Unlock` signals the daemon listens to are emitted by `org.freedesktop.login1`, the service name owned exclusively by systemd-logind, which runs as root. An unprivileged process cannot claim that service name on the system bus. A process running as a different user cannot inject fake `Lock` signals — the D-Bus daemon verifies sender credentials using kernel socket credentials (`SO_PEERCRED`). Only systemd-logind can trigger a recognition scan.
+
+**Unlocking.** When a face is recognised, the daemon calls the `Unlock()` method on the `org.freedesktop.login1.Session` object for the current session. This is authorised by polkit because the caller owns the session (same UID, same session ID). A process in a different session or with a different UID cannot call `Unlock()` on someone else's session.
+
+**Camera access without the `video` group.** The daemon runs as the logged-in user within their active logind session. systemd-logind + udev automatically grant the active session's owner access to `/dev/video*` through filesystem ACLs set at session activation time. The `video` group is not required and is not added. This is the proper Linux session permission model — the same one used by PipeWire, PulseAudio, and other session-aware daemons.
+
+**Same-UID attacker.** If an attacker already has code execution as the same user, the session is already fully compromised and the daemon adds nothing to the attack surface. They already have the same filesystem access, the same camera access, and the same D-Bus access.
+
+### Comparison with Windows Hello
+
+Windows Hello uses `WinBioSvc`, a system service running as `SYSTEM`, which holds exclusive access to the IR camera. User processes never touch the camera hardware. Facegate's watch daemon achieves an architecturally equivalent separation: the daemon is a distinct process reacting to a system event (D-Bus `Lock`), camera access is mediated by logind session ACLs rather than explicit group membership, and the user's password credentials are never involved in the face-recognition path.
+
+The key difference is that `facegate-watch` runs in the user's session (not as SYSTEM), which is why it can access session-scoped resources like the camera without elevated privileges and without bypassing the Wayland portal model.
+
+### Summary
+
+| Property | Sudo auth | Watch daemon |
+|---|---|---|
+| Runs as | root (via PAM) | user (session daemon) |
+| Camera access | direct (root) | logind session ACLs |
+| `video` group needed | no | no |
+| Network exposure | none | none |
+| D-Bus exposure | none | subscriber only (no listener) |
+| Forging a trigger | N/A — user initiates | requires impersonating systemd-logind (impossible for unprivileged code) |
+| Template readable by | root + enrolled user | root + enrolled user |
 
 ---
 

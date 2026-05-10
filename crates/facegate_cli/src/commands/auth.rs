@@ -28,7 +28,9 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
     let mut pipeline = match FacePipeline::new(config) {
         Ok(p) => p,
         Err(FaceRsError::Camera(msg)) => {
-            tracing::error!("camera error: {msg}");
+            // Print to stderr so the error appears in journalctl / PAM logs.
+            // tracing is not initialised in auth mode, so this is the only trace.
+            eprintln!("Facegate: camera error: {msg}");
             return if config.security.deny_on_camera_error {
                 AuthExitCode::CameraError
             } else {
@@ -52,7 +54,7 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
                 continue;
             }
             Err(FaceRsError::Camera(msg)) => {
-                tracing::error!("capture camera error: {msg}");
+                eprintln!("Facegate: camera error during capture: {msg}");
                 return if config.security.deny_on_camera_error {
                     AuthExitCode::CameraError
                 } else {

@@ -192,6 +192,9 @@ mkdir -p /usr/share/fish/vendor_completions.d
 echo "==> Installing man page..."
 install -Dm644 docs/facegate.1 /usr/share/man/man1/facegate.1
 
+echo "==> Installing systemd user service..."
+install -Dm644 systemd/facegate-watch.service /usr/lib/systemd/user/facegate-watch.service
+
 # ── ONNX Runtime ──────────────────────────────────────────────────────────────
 if [[ $SKIP_ORT -eq 1 ]]; then
   echo "==> Skipping ONNX Runtime download (--skip-ort)."
@@ -229,5 +232,7 @@ echo ""
 echo "Next steps:"
 echo "  1. Set your camera:   v4l2-ctl --list-devices  →  sudo facegate configure"
 echo "  2. Check everything:  sudo facegate doctor"
-echo "  3. Enroll your face:  sudo facegate add \$USER"
+echo "  3. Enroll your face:  sudo facegate add \$USER --for both"
 echo "  4. Test:              sudo facegate test \$USER"
+echo "  5. Enable screen-lock daemon (as your normal user):"
+echo "     systemctl --user enable --now facegate-watch"

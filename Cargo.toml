@@ -23,3 +23,6 @@ v4l = "0.14"
 image = "0.25"
 ort = { version = "2.0.0-rc.12", features = ["load-dynamic", "ndarray"] }
 ndarray = "0.17"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal"] }
+futures-util = "0.3"
