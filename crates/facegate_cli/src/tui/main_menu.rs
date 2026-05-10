@@ -28,13 +28,13 @@ use crate::commands;
 ///
 /// Returns `Ok(true)` when the user selects **Configure** (caller opens the
 /// config TUI then calls this again).  Returns `Ok(false)` when the user quits.
-pub fn run(config: &Config) -> Result<bool> {
+pub fn run(config: &Config, config_path: &std::path::Path) -> Result<bool> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
-    let mut app = App::new(config);
+    let mut app = App::new(config, config_path);
     let result = event_loop(&mut terminal, &mut app);
 
     let _ = disable_raw_mode();
@@ -58,6 +58,7 @@ enum Action {
     SessionToggle,
     WatchToggle,
     CameraTest,
+    Cameras,
     Enroll,
     AddSudo,
     AddSession,
@@ -149,9 +150,16 @@ fn build_items(sudo_enabled: bool, session_enabled: bool, watch_active: bool) ->
             needs_user: true,
         },
         MenuItem {
+            icon: "▤ ",
+            label: "List Cameras",
+            description: "Detect /dev/video* devices and recommend an IR cam".into(),
+            action: Some(Action::Cameras),
+            needs_user: false,
+        },
+        MenuItem {
             icon: "◉ ",
             label: "Camera Test",
-            description: "Live preview with face detection".into(),
+            description: "Live capture + face detection on the configured camera".into(),
             action: Some(Action::CameraTest),
             needs_user: false,
         },
@@ -233,6 +241,7 @@ enum PanelState {
 
 struct App<'a> {
     config: &'a Config,
+    config_path: std::path::PathBuf,
     items: Vec<MenuItem>,
     selected: usize,
     input_mode: InputMode,
@@ -259,12 +268,13 @@ struct App<'a> {
 }
 
 impl<'a> App<'a> {
-    fn new(config: &'a Config) -> Self {
+    fn new(config: &'a Config, config_path: &std::path::Path) -> Self {
         let sudo_enabled = commands::sudo_toggle::is_enabled();
         let session_enabled = commands::session_toggle::is_enabled();
         let watch_active = commands::watch_toggle::is_active();
         App {
             config,
+            config_path: config_path.to_path_buf(),
             items: build_items(sudo_enabled, session_enabled, watch_active),
             selected: 0,
             input_mode: InputMode::Menu,
@@ -624,6 +634,7 @@ impl<'a> App<'a> {
                     commands::watch_toggle::run_streaming(enable, &tx)
                 }
                 Action::CameraTest => commands::camera_test::run_streaming(&config, None, &tx),
+                Action::Cameras => commands::cameras::run_streaming(&tx),
                 Action::AddSudo => commands::add::run_streaming(
                     &config,
                     username.as_deref(),
@@ -652,7 +663,12 @@ impl<'a> App<'a> {
                     &tx,
                 ),
                 Action::List => commands::list::run_streaming(&config, username.as_deref(), &tx),
-                Action::Test => commands::test::run_streaming(&config, username.as_deref(), &tx),
+                Action::Test => commands::test::run_streaming(
+                    &config,
+                    username.as_deref(),
+                    commands::test::TestScope::All,
+                    &tx,
+                ),
                 Action::Configure | Action::Enroll => unreachable!(),
             };
             if let Err(e) = result {
@@ -822,11 +838,10 @@ fn handle_key(app: &mut App, code: KeyCode) {
                 }
                 return;
             }
-            // In Running state, ignore nav except quit
+            // In Running state, ignore *everything*. Quitting here would
+            // detach the worker thread mid-write — it could keep editing PAM
+            // files or downloading models with no UI to report progress.
             if matches!(app.panel, PanelState::Running { .. }) {
-                if code == KeyCode::Char('q') {
-                    app.should_quit = true;
-                }
                 return;
             }
             // Normal menu navigation
@@ -844,18 +859,15 @@ fn handle_key(app: &mut App, code: KeyCode) {
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 const LOGO: &[&str] = &[
-    " ███████╗ █████╗  ██████╗███████╗ ██████╗  █████╗ ████████╗███████╗",
-    " ██╔════╝██╔══██╗██╔════╝██╔════╝██╔════╝ ██╔══██╗╚══██╔══╝██╔════╝",
-    " █████╗  ███████║██║     █████╗  ██║  ███╗███████║   ██║   █████╗  ",
-    " ██╔══╝  ██╔══██║██║     ██╔══╝  ██║   ██║██╔══██║   ██║   ██╔══╝  ",
-    " ██║     ██║  ██║╚██████╗███████╗╚██████╔╝██║  ██║   ██║   ███████╗",
-    " ╚═╝     ╚═╝  ╚═╝ ╚═════╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝",
+    " ┏━╸┏━┓┏━╸┏━╸┏━╸┏━┓╺┳╸┏━╸",
+    " ┣╸ ┣━┫┃  ┣╸ ┃╺┓┣━┫ ┃ ┣╸ ",
+    " ╹  ╹ ╹┗━╸┗━╸┗━┛╹ ╹ ╹ ┗━╸",
 ];
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 fn render(f: &mut Frame, app: &App) {
     let root = Layout::vertical([
-        Constraint::Length(9),
+        Constraint::Length(6),
         Constraint::Min(5),
         Constraint::Length(3),
     ])
@@ -1095,7 +1107,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("  quit"),
+            Span::raw("  cancels are blocked while a command is running"),
         ]),
         _ => Line::from(vec![
             Span::styled(
@@ -1121,13 +1133,27 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
             Span::raw(" quit"),
         ]),
     };
+    let split = Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).split(area);
     f.render_widget(
         Paragraph::new(hints).alignment(Alignment::Center).block(
             Block::default()
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(Color::DarkGray)),
         ),
-        area,
+        split[0],
+    );
+    let cfg_line = Line::from(vec![
+        Span::styled("config: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            app.config_path.display().to_string(),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    f.render_widget(
+        Paragraph::new(cfg_line)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray)),
+        split[1],
     );
 }
 

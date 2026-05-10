@@ -26,8 +26,14 @@ const EXIT_RECOGNIZED: c_int = 0;
 const EXIT_NOT_RECOGNIZED: c_int = 1;
 const EXIT_DENIED: c_int = 6;
 
-/// Timeout for the helper process.
-const HELPER_TIMEOUT_SECS: u64 = 45;
+/// Default helper binary path (overridable via `pam_facegate.so path=...`).
+const DEFAULT_HELPER_PATH: &str = "/usr/bin/facegate";
+
+/// Hard timeout for the helper process. Must be >= max_attempts × camera.timeout_ms
+/// in the facegate config plus a small slack for model load. With the defaults
+/// (3 attempts × 5 s + ~3 s init) 25 s is comfortable; 45 s was unnecessarily
+/// long and made password fallback feel sluggish on a missed face.
+const HELPER_TIMEOUT_SECS: u64 = 25;
 
 /// `pam_sm_authenticate` — called by PAM to authenticate the user.
 ///
@@ -37,24 +43,55 @@ const HELPER_TIMEOUT_SECS: u64 = 45;
 pub unsafe extern "C" fn pam_sm_authenticate(
     pamh: *mut PamHandle,
     _flags: c_int,
-    _argc: c_int,
-    _argv: *const *const c_char,
+    argc: c_int,
+    argv: *const *const c_char,
 ) -> c_int {
     let username = match get_username(pamh) {
         Some(u) => u,
         None => return PAM_AUTH_ERR,
     };
     let service = get_pam_item_string(pamh, PAM_SERVICE);
+    let args = parse_args(argc, argv);
 
     send_info(pamh, "[ facegate ] Scanning face\u{2026}");
 
-    match run_auth_helper(&username, service.as_deref()) {
+    let helper = args.helper_path.as_deref().unwrap_or(DEFAULT_HELPER_PATH);
+    match run_auth_helper(helper, &username, service.as_deref()) {
         Ok(EXIT_RECOGNIZED) => PAM_SUCCESS,
         Ok(EXIT_NOT_RECOGNIZED) => PAM_IGNORE,
         Ok(EXIT_DENIED) => PAM_AUTH_ERR,
         Ok(_) => PAM_AUTH_ERR,
         Err(_) => PAM_IGNORE, // helper failed to run → fall through to next PAM module
     }
+}
+
+#[derive(Default)]
+struct ModuleArgs {
+    helper_path: Option<String>,
+}
+
+/// Parse `key=value` PAM module arguments. Currently recognised:
+///   - `path=/abs/path/to/facegate` — override the helper binary path
+unsafe fn parse_args(argc: c_int, argv: *const *const c_char) -> ModuleArgs {
+    let mut out = ModuleArgs::default();
+    if argv.is_null() || argc <= 0 {
+        return out;
+    }
+    for i in 0..argc as isize {
+        let raw = *argv.offset(i);
+        if raw.is_null() {
+            continue;
+        }
+        let Ok(s) = CStr::from_ptr(raw).to_str() else {
+            continue;
+        };
+        if let Some(p) = s.strip_prefix("path=") {
+            if !p.is_empty() {
+                out.helper_path = Some(p.to_owned());
+            }
+        }
+    }
+    out
 }
 
 /// `pam_sm_setcred` — required symbol even if unused.
@@ -89,9 +126,19 @@ unsafe fn send_info(pamh: *mut PamHandle, text: &str) {
     };
     let msg_ptr: *const PamMessage = &msg;
     let mut resp: *mut pam_sys::PamResponse = std::ptr::null_mut();
-    conv_fn(1, &msg_ptr, &mut resp, conv.appdata_ptr);
-    // Free any response the application allocated (PAM spec requires the module to free it).
+    let n_msg: c_int = 1;
+    conv_fn(n_msg, &msg_ptr, &mut resp, conv.appdata_ptr);
+    // PAM spec: the conv may allocate a response array of `num_msg` entries;
+    // each entry's `resp` string is also heap-allocated. The module must free
+    // both (resp[i].resp) and the array itself.
     if !resp.is_null() {
+        for i in 0..n_msg as isize {
+            let entry = resp.offset(i);
+            let s = (*entry).resp;
+            if !s.is_null() {
+                libc::free(s as *mut c_void);
+            }
+        }
         libc::free(resp as *mut c_void);
     }
 }
@@ -111,8 +158,8 @@ unsafe fn get_pam_item_string(pamh: *mut PamHandle, item_type: c_int) -> Option<
     cstr.to_str().ok().map(|s| s.to_owned())
 }
 
-fn run_auth_helper(username: &str, service: Option<&str>) -> Result<c_int, ()> {
-    let mut command = Command::new("/usr/bin/facegate");
+fn run_auth_helper(helper: &str, username: &str, service: Option<&str>) -> Result<c_int, ()> {
+    let mut command = Command::new(helper);
     command.args(["auth", "--user", username]);
     if let Some(service) = service {
         command.args(["--service", service]);

@@ -1,10 +1,23 @@
 use std::{fs, io::Write, os::unix::fs::PermissionsExt, path::Path};
 
-pub const PAM_LINE: &str = "auth      sufficient    pam_facegate.so";
+/// Absolute path so PAM finds the module regardless of the distro's default
+/// search dir (Arch: /usr/lib/security, Debian: /usr/lib/x86_64-linux-gnu/security,
+/// Fedora: /usr/lib64/security). Falling back to a bare "pam_facegate.so" only
+/// works on distros whose search path matches our install path.
+pub const PAM_LINE: &str = "auth      sufficient    /usr/lib/security/pam_facegate.so";
+
+/// Legacy bare-name form, recognised when reading existing PAM files so users
+/// who installed an earlier version can still toggle it off.
+const PAM_LINE_LEGACY: &str = "auth      sufficient    pam_facegate.so";
+
+fn line_matches(line: &str) -> bool {
+    let t = line.trim();
+    t == PAM_LINE.trim() || t == PAM_LINE_LEGACY.trim()
+}
 
 pub fn file_has_line(path: &str) -> bool {
     fs::read_to_string(path)
-        .map(|c| c.lines().any(|l| l.trim() == PAM_LINE.trim()))
+        .map(|c| c.lines().any(line_matches))
         .unwrap_or(false)
 }
 
@@ -42,7 +55,7 @@ fn set_enabled_with_content(
     content: &str,
     enabled: bool,
 ) -> anyhow::Result<bool> {
-    let already_enabled = content.lines().any(|l| l.trim() == PAM_LINE.trim());
+    let already_enabled = content.lines().any(line_matches);
 
     if enabled == already_enabled {
         return Ok(false);
@@ -58,9 +71,10 @@ fn set_enabled_with_content(
         lines.insert(insert_at, PAM_LINE);
         lines.join("\n") + "\n"
     } else {
+        // Strips both the current absolute-path form and the legacy bare-name form.
         content
             .lines()
-            .filter(|l| l.trim() != PAM_LINE.trim())
+            .filter(|l| !line_matches(l))
             .collect::<Vec<_>>()
             .join("\n")
             + "\n"
@@ -83,6 +97,10 @@ pub fn service_path(service: &str) -> Option<String> {
     None
 }
 
+/// Maximum number of `.facegate.<ts>.bak` snapshots we keep next to a PAM file.
+/// Older backups are pruned so a chatty user doesn't flood `/etc/pam.d/`.
+const MAX_BACKUPS: usize = 3;
+
 fn backup_pam_file(source_path: &str, target_path: &str) -> anyhow::Result<()> {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -91,7 +109,40 @@ fn backup_pam_file(source_path: &str, target_path: &str) -> anyhow::Result<()> {
     let backup = format!("{target_path}.facegate.{secs}.bak");
     fs::copy(source_path, &backup)
         .map_err(|e| anyhow::anyhow!("cannot create PAM backup {backup}: {e}"))?;
+    prune_old_backups(target_path);
     Ok(())
+}
+
+fn prune_old_backups(target_path: &str) {
+    let target = Path::new(target_path);
+    let Some(dir) = target.parent() else { return };
+    let Some(stem) = target.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let prefix = format!("{stem}.facegate.");
+
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut backups: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name();
+            let name = name.to_str()?;
+            if !name.starts_with(&prefix) || !name.ends_with(".bak") {
+                return None;
+            }
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            Some((mtime, e.path()))
+        })
+        .collect();
+    if backups.len() <= MAX_BACKUPS {
+        return;
+    }
+    backups.sort_by_key(|b| std::cmp::Reverse(b.0)); // newest first
+    for (_, path) in backups.into_iter().skip(MAX_BACKUPS) {
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn write_pam_atomic(target_path: &str, source_path: &str, new_content: &str) -> anyhow::Result<()> {

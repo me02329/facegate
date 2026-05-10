@@ -1,5 +1,20 @@
 [camera]
-device = "/dev/video2"
+# Pick the camera that points at you. On laptops with Windows-Hello-style
+# hardware you have *two* devices: a normal RGB webcam (typically /dev/video0)
+# and an IR / depth sensor (often /dev/video2 or /dev/video4). Both work for
+# enrollment and recognition, but the IR camera is strongly preferred:
+#
+#   - it works in the dark, so screen-unlock keeps working at night;
+#   - it's much harder to spoof with a printed photo than an RGB feed.
+#
+# To find which device is which:
+#   sudo facegate cameras                 # lists all /dev/video* with format
+#   v4l2-ctl --list-devices               # vendor names
+#   v4l2-ctl --device /dev/videoN --list-formats
+#
+# Devices reporting GREY / Y8 / Y800 are the IR streams. Devices reporting
+# only YUYV / MJPG are RGB.
+device = "/dev/video0"
 width = 640
 height = 360
 fps = 30

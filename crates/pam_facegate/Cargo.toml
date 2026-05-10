@@ -8,6 +8,7 @@ name = "pam_facegate"
 crate-type = ["cdylib"]
 
 [dependencies]
-facegate_core = { path = "../facegate_core" }
+# Intentionally minimal: no facegate_core, no ML, no async runtime. The PAM
+# module is loaded into security-critical processes (sudo, login managers),
+# so we keep its dependency graph as small and auditable as possible.
 libc = { workspace = true }
-tracing = { workspace = true }
