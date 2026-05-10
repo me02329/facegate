@@ -1,7 +1,12 @@
 use std::sync::mpsc::Sender;
 
 use facegate_core::config::Config;
-use facegate_core::storage::TemplateStore;
+use facegate_core::storage::{EnrolledTemplate, TemplateStore};
+
+pub fn load_templates(config: &Config, username: &str) -> anyhow::Result<Vec<EnrolledTemplate>> {
+    let store = TemplateStore::new(&config.storage.base_dir);
+    Ok(store.load(username)?.templates)
+}
 
 pub fn run(config: &Config, username: &str) -> anyhow::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel();

@@ -39,7 +39,14 @@ enum Command {
         purpose: EnrollmentPurpose,
     },
     /// Toggle face authentication for login/session PAM services
-    SessionAuth,
+    SessionAuth {
+        /// Extra PAM service name(s) to include beyond auto-detected ones (e.g. "gdm3")
+        #[arg(long = "pam-service", value_name = "SERVICE")]
+        pam_services: Vec<String>,
+        /// Extra PAM file path(s) to include (e.g. "/etc/pam.d/custom")
+        #[arg(long = "pam-file", value_name = "PATH")]
+        pam_files: Vec<String>,
+    },
     /// List enrolled templates for a user
     List { username: String },
     /// Remove an enrolled template (requires root)
@@ -207,7 +214,14 @@ fn run_command(
             label,
             purpose,
         } => commands::add::run(&config, &username, label.as_deref(), purpose.into()),
-        Command::SessionAuth => commands::session_toggle::run(),
+        Command::SessionAuth {
+            pam_services,
+            pam_files,
+        } => {
+            let services: Vec<&str> = pam_services.iter().map(String::as_str).collect();
+            let files: Vec<&str> = pam_files.iter().map(String::as_str).collect();
+            commands::session_toggle::run(&services, &files)
+        }
         Command::List { username } => commands::list::run(&config, &username),
         Command::Remove { username, id } => commands::remove::run(&config, &username, id),
         Command::Test { username } => commands::test::run(&config, &username),

@@ -18,6 +18,7 @@ use ratatui::{
 use std::{io, time::Duration};
 
 use facegate_core::config::Config;
+use facegate_core::storage::TemplateStore;
 
 use crate::commands;
 
@@ -56,6 +57,7 @@ enum Action {
     SudoToggle,
     SessionToggle,
     CameraTest,
+    Enroll,
     AddSudo,
     AddSession,
     AddBoth,
@@ -72,86 +74,82 @@ struct MenuItem {
 }
 
 fn build_items(sudo_enabled: bool, session_enabled: bool) -> Vec<MenuItem> {
-    let sudo_desc = if sudo_enabled {
-        "Disable sudo face authentication  (root)"
+    let sudo_label: &'static str = if sudo_enabled {
+        "Disable Sudo Auth"
     } else {
-        "Enable sudo face authentication   (root)"
+        "Enable Sudo Auth"
+    };
+    let session_label: &'static str = if session_enabled {
+        "Disable Session Auth"
+    } else {
+        "Enable Session Auth"
+    };
+    let sudo_desc = if sudo_enabled {
+        "Remove face auth from sudo/su    (root)"
+    } else {
+        "Add face scan before sudo prompt  (root)"
     };
     let session_desc = if session_enabled {
-        "Disable login/session face auth"
+        "Remove face auth from login & screen unlock"
     } else {
-        "Enable login/session face auth"
+        "Add face auth at login & screen unlock"
     };
     vec![
         MenuItem {
-            icon: "⚙ ",
-            label: "Configure",
-            description: "Edit settings".into(),
-            action: Some(Action::Configure),
-            needs_user: false,
-        },
-        MenuItem {
-            icon: "✓ ",
-            label: "Doctor",
-            description: "Check installation status".into(),
-            action: Some(Action::Doctor),
-            needs_user: false,
+            icon: "+ ",
+            label: "Enroll",
+            description: "Register a user's face for authentication".into(),
+            action: Some(Action::Enroll),
+            needs_user: true,
         },
         MenuItem {
             icon: "⊞ ",
-            label: "Sudo Auth",
+            label: sudo_label,
             description: sudo_desc.into(),
             action: Some(Action::SudoToggle),
             needs_user: false,
         },
         MenuItem {
             icon: "▣ ",
-            label: "Session Auth",
+            label: session_label,
             description: session_desc.into(),
             action: Some(Action::SessionToggle),
             needs_user: false,
         },
         MenuItem {
-            icon: "◉ ",
-            label: "Camera Test",
-            description: "Test camera and face detection".into(),
-            action: Some(Action::CameraTest),
-            needs_user: false,
-        },
-        MenuItem {
-            icon: "+ ",
-            label: "Enroll Sudo",
-            description: "Enroll a sudo-capable user".into(),
-            action: Some(Action::AddSudo),
-            needs_user: true,
-        },
-        MenuItem {
-            icon: "+ ",
-            label: "Enroll Session",
-            description: "Enroll any local user".into(),
-            action: Some(Action::AddSession),
-            needs_user: true,
-        },
-        MenuItem {
-            icon: "+ ",
-            label: "Enroll Both",
-            description: "Enroll for sudo and session".into(),
-            action: Some(Action::AddBoth),
-            needs_user: true,
-        },
-        MenuItem {
             icon: "= ",
-            label: "List Templates",
-            description: "View enrolled templates".into(),
+            label: "Templates",
+            description: "Browse & delete enrolled face templates".into(),
             action: Some(Action::List),
             needs_user: true,
         },
         MenuItem {
             icon: "~ ",
             label: "Test Recognition",
-            description: "Live recognition test      (root)".into(),
+            description: "Live match test for a user         (root)".into(),
             action: Some(Action::Test),
             needs_user: true,
+        },
+        MenuItem {
+            icon: "◉ ",
+            label: "Camera Test",
+            description: "Live preview with face detection".into(),
+            action: Some(Action::CameraTest),
+            needs_user: false,
+        },
+        MenuItem {
+            icon: "✓ ",
+            label: "Doctor",
+            description: "Verify libs, PAM config & model files".into(),
+            action: Some(Action::Doctor),
+            needs_user: false,
+        },
+        MenuItem {
+            icon: "⚙ ",
+            label: "Configure",
+            description: "Edit thresholds, camera & model settings".into(),
+            action: Some(Action::Configure),
+            needs_user: false,
         },
         MenuItem {
             icon: "  ",
@@ -172,11 +170,30 @@ fn build_items(sudo_enabled: bool, session_enabled: bool) -> Vec<MenuItem> {
 
 // ── App state ─────────────────────────────────────────────────────────────────
 
+struct SessionEntry {
+    name: &'static str,
+    service: &'static str,
+    path: String,
+    keep: bool,
+}
+
+struct TemplateEntry {
+    id: u32,
+    label: String,
+    created_at: String,
+    scope: &'static str,
+    marked: bool,
+}
+
 #[derive(PartialEq)]
 enum InputMode {
     Menu,
     UsernameInput,
     SampleCountInput,
+    PamServiceInput,
+    EnrollTargetSelect,
+    SessionServiceSelect,
+    TemplateList,
 }
 
 enum PanelState {
@@ -203,6 +220,15 @@ struct App<'a> {
     input_mode: InputMode,
     username_buf: String,
     sample_count_buf: String,
+    pam_service_buf: String,
+    enroll_sudo: bool,
+    enroll_session: bool,
+    enroll_cursor: usize,
+    session_entries: Vec<SessionEntry>,
+    session_cursor: usize,
+    template_username: String,
+    template_entries: Vec<TemplateEntry>,
+    template_cursor: usize,
     pending: Option<Action>,
     pending_username: Option<String>,
     panel: PanelState,
@@ -224,6 +250,15 @@ impl<'a> App<'a> {
             input_mode: InputMode::Menu,
             username_buf: String::new(),
             sample_count_buf: String::new(),
+            pam_service_buf: String::new(),
+            enroll_sudo: true,
+            enroll_session: false,
+            enroll_cursor: 0,
+            session_entries: Vec::new(),
+            session_cursor: 0,
+            template_username: String::new(),
+            template_entries: Vec::new(),
+            template_cursor: 0,
             pending: None,
             pending_username: None,
             panel: PanelState::Idle,
@@ -272,12 +307,29 @@ impl<'a> App<'a> {
                 self.open_config = true;
                 return;
             }
+            if action == Action::SessionToggle {
+                if self.session_enabled {
+                    // Show which services are enabled so the user can uncheck to disable
+                    self.session_entries = commands::session_toggle::enabled_service_entries()
+                        .into_iter()
+                        .map(|(name, service, path)| SessionEntry { name, service, path, keep: true })
+                        .collect();
+                    self.session_cursor = 0;
+                    self.input_mode = InputMode::SessionServiceSelect;
+                } else {
+                    // Enabling — offer a custom PAM service in case auto-detection misses it
+                    self.pending = Some(action);
+                    self.pam_service_buf.clear();
+                    self.input_mode = InputMode::PamServiceInput;
+                }
+                return;
+            }
             if self.items[self.selected].needs_user {
                 self.pending = Some(action);
                 self.username_buf.clear();
                 self.input_mode = InputMode::UsernameInput;
             } else {
-                self.launch(action, None, 1);
+                self.launch(action, None, 1, None);
             }
         }
     }
@@ -288,19 +340,85 @@ impl<'a> App<'a> {
             return;
         }
         if let Some(action) = self.pending.clone() {
-            if matches!(
-                action,
-                Action::AddSudo | Action::AddSession | Action::AddBoth
-            ) {
+            if action == Action::Enroll {
+                self.pending_username = Some(name);
+                self.enroll_sudo = true;
+                self.enroll_session = false;
+                self.enroll_cursor = 0;
+                self.input_mode = InputMode::EnrollTargetSelect;
+            } else if matches!(action, Action::AddSudo | Action::AddSession | Action::AddBoth) {
                 self.pending_username = Some(name);
                 self.sample_count_buf = "3".to_owned();
                 self.input_mode = InputMode::SampleCountInput;
+            } else if action == Action::List {
+                self.pending = None;
+                self.username_buf.clear();
+                self.input_mode = InputMode::Menu;
+                match commands::list::load_templates(self.config, &name) {
+                    Ok(ts) if ts.is_empty() => {
+                        self.panel = PanelState::Done {
+                            lines: vec![format!("No enrolled templates for '{name}'.")],
+                            scroll: 0,
+                            had_error: false,
+                        };
+                    }
+                    Ok(ts) => {
+                        self.template_username = name;
+                        self.template_entries = ts
+                            .into_iter()
+                            .map(|t| TemplateEntry {
+                                id: t.id,
+                                label: t.label,
+                                created_at: t.created_at,
+                                scope: t.scope.label(),
+                                marked: false,
+                            })
+                            .collect();
+                        self.template_cursor = 0;
+                        self.input_mode = InputMode::TemplateList;
+                    }
+                    Err(e) => {
+                        self.panel = PanelState::Done {
+                            lines: vec![format!("\nError: {e}")],
+                            scroll: 0,
+                            had_error: true,
+                        };
+                    }
+                }
             } else {
                 self.pending = None;
-                self.launch(action, Some(name), 1);
+                self.launch(action, Some(name), 1, None);
                 self.input_mode = InputMode::Menu;
             }
         }
+    }
+
+    fn toggle_enroll_target(&mut self) {
+        match self.enroll_cursor {
+            0 => self.enroll_sudo = !self.enroll_sudo,
+            1 => self.enroll_session = !self.enroll_session,
+            2 => {
+                let all = self.enroll_sudo && self.enroll_session;
+                self.enroll_sudo = !all;
+                self.enroll_session = !all;
+            }
+            _ => {}
+        }
+    }
+
+    fn confirm_enroll_targets(&mut self) {
+        if !self.enroll_sudo && !self.enroll_session {
+            return;
+        }
+        let action = match (self.enroll_sudo, self.enroll_session) {
+            (true, true) => Action::AddBoth,
+            (true, false) => Action::AddSudo,
+            (false, true) => Action::AddSession,
+            _ => unreachable!(),
+        };
+        self.pending = Some(action);
+        self.sample_count_buf = "3".to_owned();
+        self.input_mode = InputMode::SampleCountInput;
     }
 
     fn confirm_sample_count(&mut self) {
@@ -315,9 +433,102 @@ impl<'a> App<'a> {
         };
         if let (Some(action), Some(username)) = (self.pending.take(), self.pending_username.take())
         {
-            self.launch(action, Some(username), samples);
+            self.launch(action, Some(username), samples, None);
             self.input_mode = InputMode::Menu;
         }
+    }
+
+    fn confirm_pam_service(&mut self) {
+        let service = self.pam_service_buf.trim().to_owned();
+        if let Some(action) = self.pending.take() {
+            let pam_service = if service.is_empty() { None } else { Some(service) };
+            self.launch(action, None, 1, pam_service);
+            self.input_mode = InputMode::Menu;
+        }
+    }
+
+    fn toggle_session_entry(&mut self) {
+        if let Some(e) = self.session_entries.get_mut(self.session_cursor) {
+            e.keep = !e.keep;
+        }
+    }
+
+    fn confirm_session_services(&mut self) {
+        self.input_mode = InputMode::Menu;
+        let (tx, rx) = mpsc::channel::<String>();
+        let entries: Vec<_> = std::mem::take(&mut self.session_entries)
+            .into_iter()
+            .filter(|e| !e.keep)
+            .collect();
+
+        thread::spawn(move || {
+            if entries.is_empty() {
+                let _ = tx.send("No changes.".to_owned());
+                return;
+            }
+            let _ = tx.send("Session face authentication disabled.".to_owned());
+            let _ = tx.send("".to_owned());
+            let _ = tx.send("Removed from:".to_owned());
+            for e in entries {
+                match commands::pam_edit::set_service_enabled(e.service, false) {
+                    Ok(_) => {
+                        let _ = tx.send(format!("  {}: {}", e.name, e.path));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(format!("\nError: {}: {err}", e.name));
+                    }
+                }
+            }
+            let _ = tx.send("".to_owned());
+            let _ = tx.send(format!("  {}", commands::pam_edit::PAM_LINE));
+        });
+
+        self.panel = PanelState::Running { rx, lines: Vec::new(), tick: 0 };
+    }
+
+    fn toggle_template_mark(&mut self) {
+        if let Some(e) = self.template_entries.get_mut(self.template_cursor) {
+            e.marked = !e.marked;
+        }
+    }
+
+    fn confirm_template_delete(&mut self) {
+        self.input_mode = InputMode::Menu;
+        let mut ids: Vec<u32> = self.template_entries.iter()
+            .filter(|e| e.marked)
+            .map(|e| e.id)
+            .collect();
+        self.template_entries.clear();
+
+        if ids.is_empty() {
+            self.panel = PanelState::Done {
+                lines: vec!["No templates deleted.".to_owned()],
+                scroll: 0,
+                had_error: false,
+            };
+            self.template_username.clear();
+            return;
+        }
+
+        // Delete highest IDs first so lower IDs stay stable after each reassignment
+        ids.sort_unstable_by(|a, b| b.cmp(a));
+
+        let (tx, rx) = mpsc::channel::<String>();
+        let username = std::mem::take(&mut self.template_username);
+        let store = TemplateStore::new(&self.config.storage.base_dir);
+
+        thread::spawn(move || {
+            let _ = tx.send(format!("Removed {} template(s) for '{username}'.", ids.len()));
+            let _ = tx.send(String::new());
+            for id in ids {
+                match store.remove_template(&username, id) {
+                    Ok(_) => { let _ = tx.send(format!("  Removed template {id}")); }
+                    Err(e) => { let _ = tx.send(format!("\nError: template {id}: {e}")); }
+                }
+            }
+        });
+
+        self.panel = PanelState::Running { rx, lines: Vec::new(), tick: 0 };
     }
 
     fn cancel_input(&mut self) {
@@ -326,20 +537,30 @@ impl<'a> App<'a> {
         self.pending_username = None;
         self.username_buf.clear();
         self.sample_count_buf.clear();
+        self.pam_service_buf.clear();
+        self.enroll_sudo = true;
+        self.enroll_session = false;
+        self.enroll_cursor = 0;
+        self.session_entries.clear();
+        self.session_cursor = 0;
+        self.template_entries.clear();
+        self.template_username.clear();
+        self.template_cursor = 0;
     }
 
-    fn launch(&mut self, action: Action, username: Option<String>, samples: u32) {
+    fn launch(&mut self, action: Action, username: Option<String>, samples: u32, pam_service: Option<String>) {
         let (tx, rx) = mpsc::channel::<String>();
         let config = self.config.clone();
 
         thread::spawn(move || {
+            let extra: Vec<&str> = pam_service.as_deref().into_iter().collect();
             let result = match &action {
                 Action::Doctor => commands::doctor::run_streaming(&config, None, &tx),
                 Action::SudoToggle => {
                     commands::sudo_toggle::run_streaming(username.as_deref(), &tx)
                 }
                 Action::SessionToggle => {
-                    commands::session_toggle::run_streaming(username.as_deref(), &tx)
+                    commands::session_toggle::run_streaming(username.as_deref(), &extra, &[], &tx)
                 }
                 Action::CameraTest => commands::camera_test::run_streaming(&config, None, &tx),
                 Action::AddSudo => commands::add::run_streaming(
@@ -371,7 +592,7 @@ impl<'a> App<'a> {
                 ),
                 Action::List => commands::list::run_streaming(&config, username.as_deref(), &tx),
                 Action::Test => commands::test::run_streaming(&config, username.as_deref(), &tx),
-                Action::Configure => unreachable!(),
+                Action::Configure | Action::Enroll => unreachable!(),
             };
             if let Err(e) = result {
                 let _ = tx.send(format!("\nError: {e}"));
@@ -476,6 +697,63 @@ fn handle_key(app: &mut App, code: KeyCode) {
             KeyCode::Char(c) if c.is_ascii_digit() => app.sample_count_buf.push(c),
             _ => {}
         },
+        InputMode::PamServiceInput => match code {
+            KeyCode::Enter => app.confirm_pam_service(),
+            KeyCode::Esc => app.cancel_input(),
+            KeyCode::Backspace => {
+                app.pam_service_buf.pop();
+            }
+            KeyCode::Char(c) => app.pam_service_buf.push(c),
+            _ => {}
+        },
+        InputMode::SessionServiceSelect => match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if app.session_cursor > 0 {
+                    app.session_cursor -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if app.session_cursor + 1 < app.session_entries.len() {
+                    app.session_cursor += 1;
+                }
+            }
+            KeyCode::Char(' ') => app.toggle_session_entry(),
+            KeyCode::Enter => app.confirm_session_services(),
+            KeyCode::Esc => app.cancel_input(),
+            _ => {}
+        },
+        InputMode::TemplateList => match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if app.template_cursor > 0 {
+                    app.template_cursor -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if app.template_cursor + 1 < app.template_entries.len() {
+                    app.template_cursor += 1;
+                }
+            }
+            KeyCode::Char(' ') | KeyCode::Char('d') => app.toggle_template_mark(),
+            KeyCode::Enter => app.confirm_template_delete(),
+            KeyCode::Esc => app.cancel_input(),
+            _ => {}
+        },
+        InputMode::EnrollTargetSelect => match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if app.enroll_cursor > 0 {
+                    app.enroll_cursor -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if app.enroll_cursor < 2 {
+                    app.enroll_cursor += 1;
+                }
+            }
+            KeyCode::Char(' ') => app.toggle_enroll_target(),
+            KeyCode::Enter => app.confirm_enroll_targets(),
+            KeyCode::Esc => app.cancel_input(),
+            _ => {}
+        },
         InputMode::Menu => {
             // In Done state, arrows scroll; Enter/Esc go back to menu
             if matches!(app.panel, PanelState::Done { .. }) {
@@ -544,6 +822,18 @@ fn render(f: &mut Frame, app: &App) {
     if app.input_mode == InputMode::SampleCountInput {
         render_sample_count_popup(f, app);
     }
+    if app.input_mode == InputMode::PamServiceInput {
+        render_pam_service_popup(f, app);
+    }
+    if app.input_mode == InputMode::EnrollTargetSelect {
+        render_enroll_target_popup(f, app);
+    }
+    if app.input_mode == InputMode::SessionServiceSelect {
+        render_session_service_popup(f, app);
+    }
+    if app.input_mode == InputMode::TemplateList {
+        render_template_list_popup(f, app);
+    }
 }
 
 fn render_header(f: &mut Frame, area: Rect) {
@@ -608,11 +898,7 @@ fn render_menu(f: &mut Frame, area: Rect, app: &App) {
             let prefix = if sel { " ▶ " } else { "   " };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{prefix}{}", item.icon), icon_s),
-                Span::styled(format!("{:<18}", item.label), label_s),
-                Span::styled(
-                    format!(" {}", item.description),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(item.label, label_s),
             ]))
         })
         .collect();
@@ -635,18 +921,31 @@ fn render_menu(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_panel(f: &mut Frame, area: Rect, app: &App) {
     let (title, border_color, content_lines, hint) = match &app.panel {
-        PanelState::Idle => (
-            " Output ",
-            Color::DarkGray,
-            vec![
+        PanelState::Idle => {
+            let sel = &app.items[app.selected];
+            let mut lines = vec![
                 Line::from(""),
                 Line::from(Span::styled(
+                    format!("  {}{}", sel.icon, sel.label),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+            ];
+            if sel.label == "---" || sel.description.is_empty() {
+                lines.push(Line::from(Span::styled(
                     "  Select an action from the menu.",
                     Style::default().fg(Color::DarkGray),
-                )),
-            ],
-            None,
-        ),
+                )));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", sel.description),
+                    Style::default().fg(Color::White),
+                )));
+            }
+            (" Info ", Color::DarkGray, lines, None)
+        }
         PanelState::Running { lines, tick, .. } => {
             let spinner = SPINNER[(*tick as usize) % SPINNER.len()];
             let mut out: Vec<Line> = lines
@@ -874,6 +1173,316 @@ fn render_sample_count_popup(f: &mut Frame, app: &App) {
     );
     f.render_widget(
         Paragraph::new(format!(" {}_", app.sample_count_buf))
+            .style(Style::default().fg(Color::Yellow))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow)),
+            ),
+        layout[3],
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "[Enter]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" confirm   "),
+            Span::styled(
+                "[Esc]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" cancel"),
+        ]))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::DarkGray)),
+        layout[5],
+    );
+}
+
+fn render_template_list_popup(f: &mut Frame, app: &App) {
+    let n = app.template_entries.len().max(1) as u16;
+    let height = (n + 7).min(f.area().height.saturating_sub(4));
+
+    let v = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(height),
+        Constraint::Fill(1),
+    ])
+    .split(f.area());
+    let area = Layout::horizontal([
+        Constraint::Percentage(10),
+        Constraint::Percentage(80),
+        Constraint::Percentage(10),
+    ])
+    .split(v[1])[1];
+
+    f.render_widget(Clear, area);
+
+    let title = format!(" Templates — {} ", app.template_username);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            title,
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let inner_layout = Layout::vertical([
+        Constraint::Length(1), // padding
+        Constraint::Length(1), // header row
+        Constraint::Length(1), // separator
+        Constraint::Min(1),    // rows
+        Constraint::Length(1), // key hints
+    ])
+    .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("     ID   Scope    Created              Label", Style::default().fg(Color::DarkGray)),
+        ])),
+        inner_layout[1],
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "     ".to_owned() + &"─".repeat(55),
+            Style::default().fg(Color::DarkGray),
+        )),
+        inner_layout[2],
+    );
+
+    let mut rows: Vec<Line> = Vec::new();
+    for (i, e) in app.template_entries.iter().enumerate() {
+        let sel = i == app.template_cursor;
+        let (fg, prefix) = if sel {
+            (Color::Cyan, " ▶ ")
+        } else {
+            (Color::White, "   ")
+        };
+        let checkbox = if e.marked { "[x]" } else { "[ ]" };
+        let created = e.created_at.get(..16).unwrap_or(&e.created_at);
+        rows.push(Line::from(vec![
+            Span::styled(
+                format!("{prefix}{checkbox} "),
+                Style::default().fg(if e.marked { Color::Red } else { fg }).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<5} {:<8} {:<20} {}", e.id, e.scope, created, e.label),
+                Style::default().fg(if e.marked { Color::Red } else if sel { Color::Cyan } else { Color::White }),
+            ),
+        ]));
+    }
+    f.render_widget(Paragraph::new(rows), inner_layout[3]);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("[d/Space]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" mark delete   "),
+            Span::styled("[Enter]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" confirm   "),
+            Span::styled("[Esc]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" cancel"),
+        ]))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::DarkGray)),
+        inner_layout[4],
+    );
+}
+
+fn render_session_service_popup(f: &mut Frame, app: &App) {
+    let n = app.session_entries.len().max(1);
+    let height = (n as u16 + 6).min(f.area().height.saturating_sub(4));
+    let _area = centered_rect(60, 0, f.area()); // width only, height below
+    // Build a vertically-centred rect of fixed height
+    let v = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(height),
+        Constraint::Fill(1),
+    ])
+    .split(f.area());
+    let area = Layout::horizontal([
+        Constraint::Percentage(20),
+        Constraint::Percentage(60),
+        Constraint::Percentage(20),
+    ])
+    .split(v[1])[1];
+
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            " Session Auth — enabled services ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let inner_layout = Layout::vertical([
+        Constraint::Length(1), // padding
+        Constraint::Length(1), // hint text
+        Constraint::Length(1), // padding
+        Constraint::Min(1),    // service list
+        Constraint::Length(1), // key hints
+    ])
+    .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "  Uncheck services to disable, then press Enter.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        inner_layout[1],
+    );
+
+    let mut list_lines: Vec<Line> = Vec::new();
+    for (i, e) in app.session_entries.iter().enumerate() {
+        let selected = i == app.session_cursor;
+        let (fg, prefix) = if selected {
+            (Color::Cyan, " ▶ ")
+        } else {
+            (Color::White, "   ")
+        };
+        let checkbox = if e.keep { "[x]" } else { "[ ]" };
+        list_lines.push(Line::from(vec![
+            Span::styled(
+                format!("{prefix}{checkbox} "),
+                Style::default().fg(fg).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<24}", e.name),
+                Style::default().fg(if selected { Color::Cyan } else { Color::White }),
+            ),
+            Span::styled(
+                e.path.clone(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    f.render_widget(Paragraph::new(list_lines), inner_layout[3]);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("[Space]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" toggle   "),
+            Span::styled("[Enter]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" save   "),
+            Span::styled("[Esc]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" cancel"),
+        ]))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::DarkGray)),
+        inner_layout[4],
+    );
+}
+
+fn render_enroll_target_popup(f: &mut Frame, app: &App) {
+    let area = centered_rect(50, 44, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            " Enroll — select targets ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let all_checked = app.enroll_sudo && app.enroll_session;
+    let items = [
+        (app.enroll_sudo, "Sudo", "face auth for sudo/su commands"),
+        (app.enroll_session, "Session", "face auth at login & screen unlock"),
+        (all_checked, "All", "select both"),
+    ];
+
+    for (i, (checked, label, desc)) in items.iter().enumerate() {
+        let row = layout[2 + i];
+        let selected = app.enroll_cursor == i;
+        let (fg, prefix) = if selected {
+            (Color::Cyan, " ▶ ")
+        } else {
+            (Color::White, "   ")
+        };
+        let checkbox = if *checked { "[x]" } else { "[ ]" };
+        let line = Line::from(vec![
+            Span::styled(format!("{prefix}{checkbox} "), Style::default().fg(fg).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{label:<10}", label = label), Style::default().fg(if selected { Color::Cyan } else { Color::White }).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {desc}"), Style::default().fg(Color::DarkGray)),
+        ]);
+        f.render_widget(Paragraph::new(line), row);
+    }
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("[Space]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" toggle   "),
+            Span::styled("[Enter]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" confirm   "),
+            Span::styled("[Esc]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" cancel"),
+        ]))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::DarkGray)),
+        layout[7],
+    );
+}
+
+fn render_pam_service_popup(f: &mut Frame, app: &App) {
+    let area = centered_rect(52, 40, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            " Custom PAM service (optional) ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    f.render_widget(
+        Paragraph::new("  Extra PAM service to include (e.g. gdm3).\n  Leave empty to use auto-detection only.")
+            .style(Style::default().fg(Color::DarkGray)),
+        layout[1],
+    );
+    f.render_widget(
+        Paragraph::new(format!(" {}_", app.pam_service_buf))
             .style(Style::default().fg(Color::Yellow))
             .block(
                 Block::default()
