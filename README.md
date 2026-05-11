@@ -169,7 +169,7 @@ logind
 
 If recognition fails or times out, the daemon stops the camera and lets the user type their password normally. If the user types their password first (the `Unlock` signal fires), any ongoing scan is cancelled immediately.
 
-**This is architecturally equivalent to Windows Hello:** a dedicated process reacts to a system event, the user never needs to interact with an unlock form, and the camera is released as soon as a decision is made.
+This gives a Windows-Hello-style unlock experience: a dedicated process reacts to a system event, the user never needs to interact with an unlock form, and the camera is released as soon as a decision is made. It is not yet equivalent to Windows Hello's template isolation model; see [Security](#security).
 
 ---
 
@@ -345,7 +345,7 @@ All processing happens on your machine. Face embeddings are computed locally by 
 
 ### Template storage
 
-Face templates are stored as ArcFace embedding vectors — 512 floating-point numbers that represent a mathematical fingerprint of a face. They are not photographs and cannot be used to reconstruct a face image.
+Face templates are stored as ArcFace embedding vectors — compact biometric templates derived from face images. They are not photographs, but they are sensitive biometric data. Published model-inversion and template-inversion techniques can sometimes produce face-like images or transferable biometric artifacts from embeddings, so Facegate treats templates as secrets.
 
 - Templates are stored under `/var/lib/facegate/users/<username>/embeddings.json`
 - Permissions: `0600` (readable only by the file owner)
@@ -355,9 +355,12 @@ Face templates are stored as ArcFace embedding vectors — 512 floating-point nu
 
 **Note on embedding exfiltration.** Because the file is owned by the enrolled
 user, the user (or any process running as that user) can read their own ArcFace
-vector. Vectors are not photos, but a sufficiently capable adversary could use
-them to drive an image-generation model. This is acceptable in our threat model
-— same-UID code is already trusted — but worth being aware of.
+vector. This is a meaningful biometric leak: vectors are not photos, but a
+sufficiently capable adversary could use them for model inversion, transfer
+attacks, or image-generation workflows. Current releases treat same-UID code as
+trusted, but future releases should move templates behind a dedicated broker so
+normal user processes can only request a match decision, not read enrolled
+vectors.
 
 ### PAM module
 
@@ -377,9 +380,9 @@ them to drive an image-generation model. This is acceptable in our threat model
 
 ### Comparison with Windows Hello
 
-Windows Hello uses `WinBioSvc`, a system service running as `SYSTEM`, which holds exclusive access to the IR camera. User processes never touch the camera hardware. Facegate's watch daemon achieves an architecturally equivalent separation: the daemon is a distinct process reacting to a system event (D-Bus `Lock`), camera access is mediated by logind session ACLs rather than explicit group membership, and the user's password credentials are never involved in the face-recognition path.
+Windows Hello uses a privileged biometric service and hardware-backed protections to keep biometric templates outside normal user processes. Current Facegate releases do not yet provide that level of isolation: session templates are readable by the enrolled user so the watch daemon can authenticate.
 
-The key difference is that `facegate-watch` runs in the user's session (not as SYSTEM), which is why it can access session-scoped resources like the camera without elevated privileges and without bypassing the Wayland portal model.
+The planned broker architecture moves templates to a dedicated `facegate` system user and exposes only match decisions over local IPC. If the first broker implementation accepts probe embeddings computed by the client, that still protects stored templates from passive exfiltration, but it does not prove the probe came from a live camera frame. Full Windows-Hello-style semantics require broker-side frame processing and liveness checks.
 
 ### Summary
 
