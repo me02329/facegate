@@ -293,6 +293,8 @@ base_dir = "/var/lib/facegate/users"
 [security]
 allow_password_fallback = true
 deny_on_camera_error = false
+cooldown_after_failures = 10
+cooldown_seconds = 60
 
 [logging]
 level = "warn"

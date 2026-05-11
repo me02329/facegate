@@ -378,6 +378,10 @@ Template storage directory. Default:
 .BR allow_password_fallback " — whether PAM falls through to password auth on non-match (default: true)."
 .br
 .BR deny_on_camera_error " — whether a camera failure counts as auth failure (default: false, falls through)."
+.br
+.BR cooldown_after_failures " — failed match attempts before temporary cooldown (default: 10)."
+.br
+.BR cooldown_seconds " — cooldown duration in seconds (default: 60)."
 .SH FILES
 .TP
 .I /usr/bin/facegate

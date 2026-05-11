@@ -25,8 +25,6 @@ const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 const RATE_LIMIT_MAX_MATCHES: u32 = 60;
 const FAILURE_WINDOW: Duration = Duration::from_secs(300);
-const FAILURE_LOCK_THRESHOLD: u32 = 10;
-const FAILURE_LOCK_DURATION: Duration = Duration::from_secs(60);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -140,6 +138,8 @@ async fn handle_client(
 struct BrokerState {
     storage_base_dir: PathBuf,
     threshold: f32,
+    cooldown_after_failures: u32,
+    cooldown_duration: Duration,
     abuse: Arc<Mutex<AbuseState>>,
 }
 
@@ -148,6 +148,8 @@ impl BrokerState {
         Self {
             storage_base_dir: config.storage.base_dir,
             threshold: config.recognition.threshold,
+            cooldown_after_failures: config.security.cooldown_after_failures,
+            cooldown_duration: Duration::from_secs(config.security.cooldown_seconds),
             abuse: Arc::new(Mutex::new(AbuseState::default())),
         }
     }
@@ -374,7 +376,11 @@ impl BrokerState {
 
     fn record_match_failure(&self, username: &str) {
         let mut abuse = self.abuse.lock().unwrap_or_else(|e| e.into_inner());
-        abuse.record_failure(username);
+        abuse.record_failure(
+            username,
+            self.cooldown_after_failures,
+            self.cooldown_duration,
+        );
     }
 }
 
@@ -437,7 +443,7 @@ impl AbuseState {
         self.user_failures.remove(username);
     }
 
-    fn record_failure(&mut self, username: &str) {
+    fn record_failure(&mut self, username: &str, lock_threshold: u32, lock_duration: Duration) {
         let now = Instant::now();
         let failure = self
             .user_failures
@@ -453,8 +459,8 @@ impl AbuseState {
             failure.locked_until = None;
         }
         failure.failures = failure.failures.saturating_add(1);
-        if failure.failures >= FAILURE_LOCK_THRESHOLD {
-            failure.locked_until = Some(now + FAILURE_LOCK_DURATION);
+        if failure.failures >= lock_threshold {
+            failure.locked_until = Some(now + lock_duration);
         }
     }
 }
@@ -591,6 +597,8 @@ mod tests {
         let state = BrokerState {
             storage_base_dir: dir.path().to_owned(),
             threshold: 0.55,
+            cooldown_after_failures: 10,
+            cooldown_duration: Duration::from_secs(60),
             abuse: Arc::new(Mutex::new(AbuseState::default())),
         };
         (dir, state)
@@ -723,7 +731,7 @@ mod tests {
         let (_dir, state) = test_state();
         let peer = Some(PeerCredentials { uid: 0 });
 
-        for _ in 0..FAILURE_LOCK_THRESHOLD {
+        for _ in 0..state.cooldown_after_failures {
             let response = state.dispatch(
                 RequestEnvelope::new(Request::Match {
                     username: "alice".to_owned(),
