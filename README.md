@@ -258,6 +258,7 @@ systemctl --user enable --now facegate-watch
 | `list USERNAME` | List enrolled templates |
 | `remove USERNAME ID` | Remove a template by ID |
 | `test USERNAME [--for sudo\|session\|all]` | Live recognition test |
+| `calibrate USERNAME [--for sudo\|session] [--samples N] [--write]` | Recommend a recognition threshold from live positive samples |
 | `session-auth` | Toggle face auth in login/session PAM services |
 | `completions SHELL` | Print shell completion script |
 

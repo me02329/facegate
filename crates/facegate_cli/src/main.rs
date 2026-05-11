@@ -67,6 +67,19 @@ enum Command {
         #[arg(long = "for", value_enum, default_value_t = TestPurpose::All)]
         purpose: TestPurpose,
     },
+    /// Capture positive samples and recommend a recognition threshold
+    Calibrate {
+        username: String,
+        /// Which scope to calibrate (defaults to "session")
+        #[arg(long = "for", value_enum, default_value_t = CalibrationPurpose::Session)]
+        purpose: CalibrationPurpose,
+        /// Number of positive samples to capture
+        #[arg(long, default_value_t = 5)]
+        samples: u32,
+        /// Offer to write the recommended threshold to the config
+        #[arg(long)]
+        write: bool,
+    },
     /// Authenticate a user — used internally by the PAM module
     #[command(hide = true)]
     Auth {
@@ -97,6 +110,21 @@ enum TestPurpose {
     All,
     Sudo,
     Session,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CalibrationPurpose {
+    Sudo,
+    Session,
+}
+
+impl From<CalibrationPurpose> for facegate_core::storage::AuthScope {
+    fn from(value: CalibrationPurpose) -> Self {
+        match value {
+            CalibrationPurpose::Sudo => facegate_core::storage::AuthScope::Sudo,
+            CalibrationPurpose::Session => facegate_core::storage::AuthScope::Session,
+        }
+    }
 }
 
 impl From<TestPurpose> for commands::test::TestScope {
@@ -275,6 +303,19 @@ fn run_command(
         Command::Test { username, purpose } => {
             commands::test::run(&config, &username, purpose.into())
         }
+        Command::Calibrate {
+            username,
+            purpose,
+            samples,
+            write,
+        } => commands::calibrate::run(
+            config,
+            config_path,
+            &username,
+            purpose.into(),
+            samples,
+            write,
+        ),
         Command::Auth { user, service } => {
             std::process::exit(commands::auth::run(&config, &user, service.as_deref()) as i32);
         }

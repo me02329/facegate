@@ -56,6 +56,14 @@ facegate \- native facial authentication for Linux, including automatic screen u
 .I USERNAME
 .YS
 .SY facegate
+.B calibrate
+.RI [ --config " PATH" ]
+.I USERNAME
+.RI [ --for " sudo|session" ]
+.RI [ --samples " N" ]
+.RI [ --write ]
+.YS
+.SY facegate
 .B completions
 .I SHELL
 .YS
@@ -231,6 +239,16 @@ Capture a live face embedding and compare it against all enrolled templates for
 .IR USERNAME .
 Prints the best cosine similarity score, the configured threshold, and an
 ACCEPT or REJECT result.
+.TP
+.B calibrate \fIUSERNAME\fR [\fB--for\fR \fIsudo|session\fR] [\fB--samples\fR \fIN\fR] [\fB--write\fR]
+Capture multiple live positive samples, compare each probe through the broker,
+print the observed score distribution, and recommend a recognition threshold.
+The recommendation is the lowest observed positive score minus a fixed safety
+margin. Calibration never overwrites enrolled templates. With
+.BR --write ,
+Facegate asks for confirmation before backing up the config and writing the
+recommended value to
+.BR recognition.threshold .
 .TP
 .B completions \fISHELL\fR
 Print shell completion scripts to stdout. Supported shells:
