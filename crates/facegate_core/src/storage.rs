@@ -1,14 +1,16 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use zeroize::Zeroize;
 
 use crate::error::{FaceRsError, Result};
 use crate::matching::Embedding;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EnrolledTemplate {
     pub id: u32,
     pub label: String,
@@ -16,6 +18,18 @@ pub struct EnrolledTemplate {
     #[serde(default = "default_template_scope")]
     pub scope: TemplateScope,
     pub embedding: Embedding,
+}
+
+impl fmt::Debug for EnrolledTemplate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnrolledTemplate")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("created_at", &self.created_at)
+            .field("scope", &self.scope)
+            .field("embedding", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,7 +69,7 @@ fn default_template_scope() -> TemplateScope {
     TemplateScope::Both
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct UserTemplates {
     pub templates: Vec<EnrolledTemplate>,
     /// Monotonic counter — the next id we'll hand out. Persisted so we never
@@ -65,6 +79,15 @@ pub struct UserTemplates {
     /// field) loadable: we recompute it from `templates` on first load.
     #[serde(default)]
     pub next_id: u32,
+}
+
+impl fmt::Debug for UserTemplates {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UserTemplates")
+            .field("templates", &self.templates)
+            .field("next_id", &self.next_id)
+            .finish()
+    }
 }
 
 pub struct TemplateStore {
@@ -112,7 +135,7 @@ impl TemplateStore {
             fs::create_dir_all(&self.base_dir).map_err(|e| {
                 FaceRsError::Storage(format!("cannot create {}: {e}", self.base_dir.display()))
             })?;
-            fs::set_permissions(&self.base_dir, fs::Permissions::from_mode(0o755)).map_err(
+            fs::set_permissions(&self.base_dir, fs::Permissions::from_mode(0o700)).map_err(
                 |e| {
                     FaceRsError::Storage(format!(
                         "cannot set permissions on {}: {e}",
@@ -294,6 +317,7 @@ impl TemplateStore {
         };
         store.templates.push(template.clone());
         self.save(username, &store)?;
+        zeroize_templates(&mut store.templates);
         Ok(template)
     }
 
@@ -309,7 +333,9 @@ impl TemplateStore {
         // IDs are not renumbered: callers (CLI, TUI) reference templates by ID
         // and renumbering after a delete shifts all subsequent IDs, surprising
         // the user and breaking any in-flight script.
-        self.save(username, &store)
+        let result = self.save(username, &store);
+        zeroize_templates(&mut store.templates);
+        result
     }
 
     pub fn embeddings_for(&self, username: &str) -> Result<Vec<Embedding>> {
@@ -336,6 +362,12 @@ impl TemplateStore {
             return Err(FaceRsError::NotEnrolled);
         }
         Ok(embeddings)
+    }
+}
+
+fn zeroize_templates(templates: &mut [EnrolledTemplate]) {
+    for template in templates {
+        template.embedding.zeroize();
     }
 }
 
@@ -505,6 +537,22 @@ mod tests {
         assert_eq!(format_unix_utc(1_778_371_200), "2026-05-10T00:00:00Z");
         // Leap day: 2024-02-29T12:34:56Z = 1709210096
         assert_eq!(format_unix_utc(1_709_210_096), "2024-02-29T12:34:56Z");
+    }
+
+    #[test]
+    fn debug_redacts_embeddings() {
+        let template = EnrolledTemplate {
+            id: 1,
+            label: "front".to_owned(),
+            created_at: "2026-05-11T00:00:00Z".to_owned(),
+            scope: TemplateScope::Both,
+            embedding: vec![0.123456, 0.654321],
+        };
+        let debug = format!("{template:?}");
+
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("0.123456"));
+        assert!(!debug.contains("0.654321"));
     }
 
     #[test]

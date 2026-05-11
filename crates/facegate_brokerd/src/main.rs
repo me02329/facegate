@@ -2,6 +2,8 @@ use std::ffi::CString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use facegate_core::config::{Config, DEFAULT_CONFIG_PATH};
@@ -16,9 +18,15 @@ use std::os::unix::fs::FileTypeExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task;
+use zeroize::Zeroize;
 
 const DEFAULT_SOCKET_PATH: &str = "/run/facegate/broker.sock";
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+const RATE_LIMIT_MAX_MATCHES: u32 = 60;
+const FAILURE_WINDOW: Duration = Duration::from_secs(300);
+const FAILURE_LOCK_THRESHOLD: u32 = 10;
+const FAILURE_LOCK_DURATION: Duration = Duration::from_secs(60);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -132,6 +140,7 @@ async fn handle_client(
 struct BrokerState {
     storage_base_dir: PathBuf,
     threshold: f32,
+    abuse: Arc<Mutex<AbuseState>>,
 }
 
 impl BrokerState {
@@ -139,6 +148,7 @@ impl BrokerState {
         Self {
             storage_base_dir: config.storage.base_dir,
             threshold: config.recognition.threshold,
+            abuse: Arc::new(Mutex::new(AbuseState::default())),
         }
     }
 
@@ -167,13 +177,17 @@ impl BrokerState {
             Request::Match {
                 username,
                 auth_scope,
-                probe_embedding,
-            } => self.match_embedding(
-                peer,
-                &username,
-                core_auth_scope(auth_scope),
-                &probe_embedding,
-            ),
+                mut probe_embedding,
+            } => {
+                let response = self.match_embedding(
+                    peer,
+                    &username,
+                    core_auth_scope(auth_scope),
+                    &probe_embedding,
+                );
+                probe_embedding.zeroize();
+                response
+            }
             Request::MatchFrame { .. } => ResponseEnvelope::error(
                 ErrorCode::Unsupported,
                 "frame-based matching is not implemented yet",
@@ -182,14 +196,18 @@ impl BrokerState {
                 username,
                 label,
                 scope,
-                embedding,
-            } => self.enroll(
-                peer,
-                &username,
-                &label,
-                core_template_scope(scope),
-                embedding,
-            ),
+                mut embedding,
+            } => {
+                let response = self.enroll(
+                    peer,
+                    &username,
+                    &label,
+                    core_template_scope(scope),
+                    embedding.clone(),
+                );
+                embedding.zeroize();
+                response
+            }
             Request::List { username } => self.list(peer, &username),
             Request::Remove {
                 username,
@@ -212,11 +230,21 @@ impl BrokerState {
         if !authorized_for_match(peer, username, auth_scope) {
             return unauthorized();
         }
+        let Some(peer) = peer else {
+            return unauthorized();
+        };
+        match self.check_match_allowed(peer, username) {
+            Ok(()) => {}
+            Err(error) => return error,
+        }
 
         let store = self.store();
-        let templates = match store.load(username) {
+        let mut templates = match store.load(username) {
             Ok(store) => store.templates,
-            Err(e) => return storage_error(e),
+            Err(e) => {
+                self.record_match_failure(username);
+                return storage_error(e);
+            }
         };
 
         let mut best: Option<(u32, f32)> = None;
@@ -234,12 +262,20 @@ impl BrokerState {
         }
 
         let Some((template_id, score)) = best else {
+            self.zeroize_templates(&mut templates);
+            self.record_match_failure(username);
             return ResponseEnvelope::error(
                 ErrorCode::NotEnrolled,
                 "user has no enrolled templates",
             );
         };
         let matched = score >= self.threshold;
+        self.zeroize_templates(&mut templates);
+        if matched {
+            self.record_match_success(username);
+        } else {
+            self.record_match_failure(username);
+        }
         ResponseEnvelope::ok(Response::Match {
             result: MatchResult {
                 matched,
@@ -262,14 +298,16 @@ impl BrokerState {
         }
 
         match self.store().add_template(username, label, scope, embedding) {
-            Ok(template) => ResponseEnvelope::ok(Response::Enrolled {
-                template: EnrolledTemplateSummary {
+            Ok(mut template) => {
+                let summary = EnrolledTemplateSummary {
                     id: template.id,
-                    label: template.label,
-                    created_at: template.created_at,
+                    label: template.label.clone(),
+                    created_at: template.created_at.clone(),
                     scope: ipc_template_scope(template.scope),
-                },
-            }),
+                };
+                template.embedding.zeroize();
+                ResponseEnvelope::ok(Response::Enrolled { template: summary })
+            }
             Err(e) => storage_error(e),
         }
     }
@@ -280,18 +318,20 @@ impl BrokerState {
         }
 
         match self.store().load(username) {
-            Ok(store) => ResponseEnvelope::ok(Response::List {
-                templates: store
+            Ok(mut store) => {
+                let templates = store
                     .templates
-                    .into_iter()
+                    .iter_mut()
                     .map(|template| EnrolledTemplateSummary {
                         id: template.id,
-                        label: template.label,
-                        created_at: template.created_at,
+                        label: template.label.clone(),
+                        created_at: template.created_at.clone(),
                         scope: ipc_template_scope(template.scope),
                     })
-                    .collect(),
-            }),
+                    .collect();
+                self.zeroize_templates(&mut store.templates);
+                ResponseEnvelope::ok(Response::List { templates })
+            }
             Err(e) => storage_error(e),
         }
     }
@@ -311,6 +351,125 @@ impl BrokerState {
             Err(e) => storage_error(e),
         }
     }
+
+    fn zeroize_templates(&self, templates: &mut [facegate_core::storage::EnrolledTemplate]) {
+        for template in templates {
+            template.embedding.zeroize();
+        }
+    }
+
+    fn check_match_allowed(
+        &self,
+        peer: PeerCredentials,
+        username: &str,
+    ) -> std::result::Result<(), ResponseEnvelope> {
+        let mut abuse = self.abuse.lock().unwrap_or_else(|e| e.into_inner());
+        abuse.check_match_allowed(peer.uid, username)
+    }
+
+    fn record_match_success(&self, username: &str) {
+        let mut abuse = self.abuse.lock().unwrap_or_else(|e| e.into_inner());
+        abuse.record_success(username);
+    }
+
+    fn record_match_failure(&self, username: &str) {
+        let mut abuse = self.abuse.lock().unwrap_or_else(|e| e.into_inner());
+        abuse.record_failure(username);
+    }
+}
+
+#[derive(Debug, Default)]
+struct AbuseState {
+    peer_limits: std::collections::HashMap<u32, WindowCounter>,
+    user_failures: std::collections::HashMap<String, FailureCounter>,
+}
+
+impl AbuseState {
+    fn check_match_allowed(
+        &mut self,
+        peer_uid: u32,
+        username: &str,
+    ) -> std::result::Result<(), ResponseEnvelope> {
+        let now = Instant::now();
+        let peer = self
+            .peer_limits
+            .entry(peer_uid)
+            .or_insert_with(|| WindowCounter {
+                window_started: now,
+                count: 0,
+            });
+        if now.duration_since(peer.window_started) > RATE_LIMIT_WINDOW {
+            peer.window_started = now;
+            peer.count = 0;
+        }
+        if peer.count >= RATE_LIMIT_MAX_MATCHES {
+            return Err(ResponseEnvelope::error(
+                ErrorCode::RateLimited,
+                "too many match requests",
+            ));
+        }
+        peer.count += 1;
+
+        let failure = self
+            .user_failures
+            .entry(username.to_owned())
+            .or_insert_with(|| FailureCounter {
+                window_started: now,
+                failures: 0,
+                locked_until: None,
+            });
+        if let Some(locked_until) = failure.locked_until {
+            if now < locked_until {
+                return Err(ResponseEnvelope::error(
+                    ErrorCode::LockedOut,
+                    "too many failed match attempts",
+                ));
+            }
+            failure.locked_until = None;
+            failure.failures = 0;
+            failure.window_started = now;
+        }
+
+        Ok(())
+    }
+
+    fn record_success(&mut self, username: &str) {
+        self.user_failures.remove(username);
+    }
+
+    fn record_failure(&mut self, username: &str) {
+        let now = Instant::now();
+        let failure = self
+            .user_failures
+            .entry(username.to_owned())
+            .or_insert_with(|| FailureCounter {
+                window_started: now,
+                failures: 0,
+                locked_until: None,
+            });
+        if now.duration_since(failure.window_started) > FAILURE_WINDOW {
+            failure.window_started = now;
+            failure.failures = 0;
+            failure.locked_until = None;
+        }
+        failure.failures = failure.failures.saturating_add(1);
+        if failure.failures >= FAILURE_LOCK_THRESHOLD {
+            failure.locked_until = Some(now + FAILURE_LOCK_DURATION);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct WindowCounter {
+    window_started: Instant,
+    count: u32,
+}
+
+#[derive(Debug)]
+struct FailureCounter {
+    window_started: Instant,
+    failures: u32,
+    locked_until: Option<Instant>,
 }
 
 async fn write_response(stream: &mut UnixStream, response: ResponseEnvelope) -> Result<()> {
@@ -432,6 +591,7 @@ mod tests {
         let state = BrokerState {
             storage_base_dir: dir.path().to_owned(),
             threshold: 0.55,
+            abuse: Arc::new(Mutex::new(AbuseState::default())),
         };
         (dir, state)
     }
@@ -525,6 +685,68 @@ mod tests {
 
         assert!(result.matched);
         assert_eq!(result.template_id, Some(0));
+    }
+
+    #[test]
+    fn rate_limits_match_requests_per_peer() {
+        let (_dir, state) = test_state();
+        let peer = Some(PeerCredentials { uid: 0 });
+
+        for _ in 0..RATE_LIMIT_MAX_MATCHES {
+            let response = state.dispatch(
+                RequestEnvelope::new(Request::Match {
+                    username: "alice".to_owned(),
+                    auth_scope: IpcAuthScope::Session,
+                    probe_embedding: vec![1.0],
+                }),
+                peer,
+            );
+            assert!(matches!(response.response, Response::Error(_)));
+        }
+
+        let response = state.dispatch(
+            RequestEnvelope::new(Request::Match {
+                username: "alice".to_owned(),
+                auth_scope: IpcAuthScope::Session,
+                probe_embedding: vec![1.0],
+            }),
+            peer,
+        );
+        let Response::Error(error) = response.response else {
+            panic!("expected rate limit error");
+        };
+        assert_eq!(error.code, ErrorCode::RateLimited);
+    }
+
+    #[test]
+    fn locks_out_after_repeated_failed_matches() {
+        let (_dir, state) = test_state();
+        let peer = Some(PeerCredentials { uid: 0 });
+
+        for _ in 0..FAILURE_LOCK_THRESHOLD {
+            let response = state.dispatch(
+                RequestEnvelope::new(Request::Match {
+                    username: "alice".to_owned(),
+                    auth_scope: IpcAuthScope::Session,
+                    probe_embedding: vec![1.0],
+                }),
+                peer,
+            );
+            assert!(matches!(response.response, Response::Error(_)));
+        }
+
+        let response = state.dispatch(
+            RequestEnvelope::new(Request::Match {
+                username: "alice".to_owned(),
+                auth_scope: IpcAuthScope::Session,
+                probe_embedding: vec![1.0],
+            }),
+            peer,
+        );
+        let Response::Error(error) = response.response else {
+            panic!("expected lockout error");
+        };
+        assert_eq!(error.code, ErrorCode::LockedOut);
     }
 
     #[test]

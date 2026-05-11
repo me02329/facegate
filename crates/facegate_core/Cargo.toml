@@ -15,6 +15,7 @@ v4l = { workspace = true }
 image = { workspace = true }
 ort = { workspace = true }
 ndarray = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

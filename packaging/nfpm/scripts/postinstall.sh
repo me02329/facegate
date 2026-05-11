@@ -25,14 +25,36 @@ if ! id -u facegate >/dev/null 2>&1; then
     useradd --system --no-create-home --gid facegate --shell "$facegate_nologin" facegate
 fi
 
+migrate_template_storage() {
+    local users_dir="/var/lib/facegate/users"
+
+    if [ -L "$users_dir" ]; then
+        echo "Warning: $users_dir is a symlink; leaving template storage untouched." >&2
+        return 0
+    fi
+    if [ ! -d "$users_dir" ]; then
+        install -d -m 0700 -o facegate -g facegate "$users_dir"
+        return 0
+    fi
+
+    while IFS= read -r path; do
+        echo "Warning: suspicious template path left untouched: $path" >&2
+    done < <(find -P "$users_dir" \( -type l -o -type p -o -type s -o -type b -o -type c \) -print 2>/dev/null)
+
+    chown facegate:facegate "$users_dir"
+    chmod 700 "$users_dir"
+
+    find -P "$users_dir" -type d -exec chown facegate:facegate {} +
+    find -P "$users_dir" -type d -exec chmod 700 {} +
+    find -P "$users_dir" -type f -name embeddings.json -exec chown facegate:facegate {} +
+    find -P "$users_dir" -type f -name embeddings.json -exec chmod 600 {} +
+}
+
 mkdir -p /etc/facegate "$MODELS_DIR" /var/lib/facegate/users
 chown -R root:root /etc/facegate /usr/share/facegate
 chown root:root /var/lib/facegate
-chown -R facegate:facegate /var/lib/facegate/users
 chmod 755 /var/lib/facegate
-chmod 700 /var/lib/facegate/users
-find -P /var/lib/facegate/users -type d -exec chmod 700 {} +
-find -P /var/lib/facegate/users -name embeddings.json -type f -exec chmod 600 {} +
+migrate_template_storage
 chmod 644 /etc/facegate/config.toml 2>/dev/null || true
 
 # ── Shell completions ─────────────────────────────────────────────────────────
