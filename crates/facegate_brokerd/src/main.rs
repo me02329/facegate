@@ -7,13 +7,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
-use facegate_core::config::{Config, DEFAULT_CONFIG_PATH};
+use facegate_core::camera::Frame;
+use facegate_core::config::{Config, ModelsConfig, DEFAULT_CONFIG_PATH};
+use facegate_core::detection::ScrfdDetector;
+use facegate_core::embedding::ArcFaceEmbedder;
 use facegate_core::error::FaceRsError;
 use facegate_core::matching::cosine_similarity;
 use facegate_core::storage::{AuthScope, TemplateScope, TemplateStore};
 use facegate_ipc::{
     encode_response, AuditEvent, AuditOutcome, AuditReason, BrokerInfo, EnrolledTemplateSummary,
-    ErrorCode, MatchResult, Request, RequestEnvelope, Response, ResponseEnvelope, PROTOCOL_VERSION,
+    ErrorCode, FrameFormat, FrameProbe, MatchResult, Request, RequestEnvelope, Response,
+    ResponseEnvelope, MAX_REQUEST_BYTES, PROTOCOL_VERSION,
 };
 use std::os::unix::fs::FileTypeExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -22,10 +26,12 @@ use tokio::task;
 use zeroize::Zeroize;
 
 const DEFAULT_SOCKET_PATH: &str = "/run/facegate/broker.sock";
-const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 const RATE_LIMIT_MAX_MATCHES: u32 = 60;
 const FAILURE_WINDOW: Duration = Duration::from_secs(300);
+/// Reject frames whose declared geometry exceeds this bound before any
+/// allocation. Above 4K, broker-side inference is not realistic anyway.
+const MAX_FRAME_PIXELS: u32 = 4096 * 4096;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -135,14 +141,25 @@ async fn handle_client(
     write_response(reader.get_mut(), response).await
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct BrokerState {
     storage_base_dir: PathBuf,
     audit_path: PathBuf,
     threshold: f32,
+    min_face_size: u32,
     cooldown_after_failures: u32,
     cooldown_duration: Duration,
     abuse: Arc<Mutex<AbuseState>>,
+    models: ModelsConfig,
+    /// SCRFD + ArcFace, lazily loaded on first MatchFrame request. Guarded by
+    /// a Mutex because ort sessions hold non-Send state once mid-inference and
+    /// we serialise inference anyway — there is no benefit to parallelism here.
+    inference: Arc<Mutex<Option<InferenceState>>>,
+}
+
+struct InferenceState {
+    detector: ScrfdDetector,
+    embedder: ArcFaceEmbedder,
 }
 
 impl BrokerState {
@@ -157,9 +174,12 @@ impl BrokerState {
             storage_base_dir: config.storage.base_dir,
             audit_path,
             threshold: config.recognition.threshold,
+            min_face_size: config.recognition.min_face_size,
             cooldown_after_failures: config.security.cooldown_after_failures,
             cooldown_duration: Duration::from_secs(config.security.cooldown_seconds),
             abuse: Arc::new(Mutex::new(AbuseState::default())),
+            models: config.models,
+            inference: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -191,19 +211,31 @@ impl BrokerState {
                 auth_scope,
                 mut probe_embedding,
             } => {
-                let response = self.match_embedding(
-                    peer,
-                    &username,
-                    core_auth_scope(auth_scope),
-                    &probe_embedding,
-                );
+                // Admin-only since v2: non-root callers cannot bypass live capture by
+                // submitting a precomputed embedding. Auth paths must use MatchFrame.
+                let response = if peer.map(|p| p.uid == 0).unwrap_or(false) {
+                    self.match_embedding(
+                        peer,
+                        &username,
+                        core_auth_scope(auth_scope),
+                        &probe_embedding,
+                    )
+                } else {
+                    unauthorized()
+                };
                 probe_embedding.zeroize();
                 response
             }
-            Request::MatchFrame { .. } => ResponseEnvelope::error(
-                ErrorCode::Unsupported,
-                "frame-based matching is not implemented yet",
-            ),
+            Request::MatchFrame {
+                username,
+                auth_scope,
+                mut frame,
+            } => {
+                let response =
+                    self.match_frame(peer, &username, core_auth_scope(auth_scope), &frame);
+                frame.bytes.zeroize();
+                response
+            }
             Request::Enroll {
                 username,
                 label,
@@ -265,6 +297,19 @@ impl BrokerState {
             }
         }
 
+        self.compare_embedding(username, auth_scope, probe_embedding)
+    }
+
+    /// Compare a probe embedding against the stored templates for `username`.
+    /// Assumes peer authorization and rate-limit checks have already been
+    /// performed; writes the final outcome to the audit log and returns the
+    /// response envelope.
+    fn compare_embedding(
+        &self,
+        username: &str,
+        auth_scope: AuthScope,
+        probe_embedding: &[f32],
+    ) -> ResponseEnvelope {
         let store = self.store();
         let mut templates = match store.load(username) {
             Ok(store) => store.templates,
@@ -334,6 +379,133 @@ impl BrokerState {
                 template_id: matched.then_some(template_id),
             },
         })
+    }
+
+    fn match_frame(
+        &self,
+        peer: Option<PeerCredentials>,
+        username: &str,
+        auth_scope: AuthScope,
+        probe: &FrameProbe,
+    ) -> ResponseEnvelope {
+        if !authorized_for_match(peer, username, auth_scope) {
+            self.write_audit(
+                username,
+                auth_scope,
+                AuditOutcome::Failure,
+                AuditReason::Unauthorized,
+            );
+            return unauthorized();
+        }
+        let Some(peer) = peer else {
+            self.write_audit(
+                username,
+                auth_scope,
+                AuditOutcome::Failure,
+                AuditReason::Unauthorized,
+            );
+            return unauthorized();
+        };
+        match self.check_match_allowed(peer, username) {
+            Ok(()) => {}
+            Err((error, reason)) => {
+                self.write_audit(username, auth_scope, AuditOutcome::Failure, reason);
+                return error;
+            }
+        }
+
+        let mut frame = match frame_from_probe(probe) {
+            Ok(frame) => frame,
+            Err(err) => {
+                self.record_match_failure(username);
+                self.write_audit(
+                    username,
+                    auth_scope,
+                    AuditOutcome::Failure,
+                    AuditReason::Internal,
+                );
+                return err;
+            }
+        };
+
+        let mut probe_embedding = match self.run_inference(&frame) {
+            Ok(Some(embedding)) => embedding,
+            Ok(None) => {
+                frame.data.zeroize();
+                // No face detected — treated as a mismatch so rate limit /
+                // lockout counters apply, but reported with score=None so the
+                // client can distinguish a no-face frame from a low-score
+                // match.
+                self.record_match_failure(username);
+                self.write_audit(
+                    username,
+                    auth_scope,
+                    AuditOutcome::Failure,
+                    AuditReason::Mismatch,
+                );
+                return ResponseEnvelope::ok(Response::Match {
+                    result: MatchResult {
+                        matched: false,
+                        score: None,
+                        template_id: None,
+                    },
+                });
+            }
+            Err(err) => {
+                frame.data.zeroize();
+                self.record_match_failure(username);
+                self.write_audit(
+                    username,
+                    auth_scope,
+                    AuditOutcome::Failure,
+                    AuditReason::Internal,
+                );
+                return err;
+            }
+        };
+        frame.data.zeroize();
+
+        let response = self.compare_embedding(username, auth_scope, &probe_embedding);
+        probe_embedding.zeroize();
+        response
+    }
+
+    /// Lock the inference state, lazily loading SCRFD + ArcFace on first use,
+    /// then detect+embed the largest face. Returns Ok(None) when no face is
+    /// found in the frame.
+    fn run_inference(
+        &self,
+        frame: &Frame,
+    ) -> std::result::Result<Option<Vec<f32>>, ResponseEnvelope> {
+        let mut guard = self.inference.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = Some(load_inference(&self.models).map_err(|e| {
+                tracing::error!("cannot load inference models: {e}");
+                ResponseEnvelope::error(ErrorCode::Internal, "broker inference unavailable")
+            })?);
+        }
+        let state = guard.as_mut().expect("inference loaded above");
+
+        let detections = state
+            .detector
+            .detect(frame, self.min_face_size)
+            .map_err(|e| {
+                tracing::warn!("detection error: {e}");
+                ResponseEnvelope::error(ErrorCode::Internal, "face detection failed")
+            })?;
+
+        let Some(detection) = detections
+            .into_iter()
+            .max_by(|a, b| a.bbox.area().total_cmp(&b.bbox.area()))
+        else {
+            return Ok(None);
+        };
+
+        let embedding = state.embedder.extract(frame, &detection).map_err(|e| {
+            tracing::warn!("embedding error: {e}");
+            ResponseEnvelope::error(ErrorCode::Internal, "face embedding failed")
+        })?;
+        Ok(Some(embedding))
     }
 
     fn enroll(
@@ -709,6 +881,71 @@ fn ipc_template_scope(value: TemplateScope) -> facegate_ipc::TemplateScope {
     }
 }
 
+fn load_inference(models: &ModelsConfig) -> Result<InferenceState> {
+    tracing::debug!(path = %models.detector.display(), "loading detector");
+    let detector = ScrfdDetector::load(&models.detector)
+        .with_context(|| format!("cannot load detector at {}", models.detector.display()))?;
+    tracing::debug!(path = %models.embedder.display(), "loading embedder");
+    let embedder = ArcFaceEmbedder::load(&models.embedder)
+        .with_context(|| format!("cannot load embedder at {}", models.embedder.display()))?;
+    Ok(InferenceState { detector, embedder })
+}
+
+fn frame_from_probe(probe: &FrameProbe) -> std::result::Result<Frame, ResponseEnvelope> {
+    if probe.width == 0 || probe.height == 0 {
+        return Err(ResponseEnvelope::error(
+            ErrorCode::BadRequest,
+            "frame width and height must be non-zero",
+        ));
+    }
+    let pixels = probe.width.saturating_mul(probe.height);
+    if pixels > MAX_FRAME_PIXELS {
+        return Err(ResponseEnvelope::error(
+            ErrorCode::BadRequest,
+            "frame geometry exceeds broker limit",
+        ));
+    }
+    let pixels = pixels as usize;
+    let expected = match probe.format {
+        FrameFormat::Rgb8 | FrameFormat::Bgr8 => pixels.saturating_mul(3),
+        FrameFormat::Gray8 => pixels,
+    };
+    if probe.bytes.len() != expected {
+        return Err(ResponseEnvelope::error(
+            ErrorCode::BadRequest,
+            format!(
+                "frame buffer size mismatch: got {}, expected {}",
+                probe.bytes.len(),
+                expected
+            ),
+        ));
+    }
+
+    let data = match probe.format {
+        FrameFormat::Rgb8 => probe.bytes.clone(),
+        FrameFormat::Bgr8 => {
+            let mut out = Vec::with_capacity(probe.bytes.len());
+            for chunk in probe.bytes.chunks_exact(3) {
+                out.extend_from_slice(&[chunk[2], chunk[1], chunk[0]]);
+            }
+            out
+        }
+        FrameFormat::Gray8 => {
+            let mut out = Vec::with_capacity(pixels * 3);
+            for &y in &probe.bytes {
+                out.extend_from_slice(&[y, y, y]);
+            }
+            out
+        }
+    };
+
+    Ok(Frame {
+        data,
+        width: probe.width,
+        height: probe.height,
+    })
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -732,9 +969,15 @@ mod tests {
             storage_base_dir: dir.path().to_owned(),
             audit_path: dir.path().join("audit.log"),
             threshold: 0.55,
+            min_face_size: 80,
             cooldown_after_failures: 10,
             cooldown_duration: Duration::from_secs(60),
             abuse: Arc::new(Mutex::new(AbuseState::default())),
+            models: facegate_core::config::ModelsConfig {
+                detector: std::path::PathBuf::new(),
+                embedder: std::path::PathBuf::new(),
+            },
+            inference: Arc::new(Mutex::new(None)),
         };
         (dir, state)
     }
@@ -930,6 +1173,93 @@ mod tests {
             panic!("expected lockout error");
         };
         assert_eq!(error.code, ErrorCode::LockedOut);
+    }
+
+    #[test]
+    fn match_rejects_non_root_callers() {
+        // Match is admin-only since protocol v2 — non-root must go through
+        // MatchFrame so the broker controls the embedding.
+        let (_dir, state) = test_state();
+        let response = state.dispatch(
+            RequestEnvelope::new(Request::Match {
+                username: "alice".to_owned(),
+                auth_scope: IpcAuthScope::Session,
+                probe_embedding: unit_vec(&[1.0, 0.0]),
+            }),
+            Some(PeerCredentials { uid: 1000 }),
+        );
+        let Response::Error(error) = response.response else {
+            panic!("expected error for non-root Match");
+        };
+        assert_eq!(error.code, ErrorCode::Unauthorized);
+    }
+
+    #[test]
+    fn match_frame_rejects_malformed_buffer() {
+        let (_dir, state) = test_state();
+        let response = state.dispatch(
+            RequestEnvelope::new(Request::MatchFrame {
+                username: "alice".to_owned(),
+                auth_scope: IpcAuthScope::Session,
+                frame: facegate_ipc::FrameProbe {
+                    format: facegate_ipc::FrameFormat::Rgb8,
+                    width: 4,
+                    height: 4,
+                    bytes: vec![0; 10], // expected 48 bytes
+                },
+            }),
+            Some(PeerCredentials { uid: 0 }),
+        );
+        let Response::Error(error) = response.response else {
+            panic!("expected error for malformed frame");
+        };
+        assert_eq!(error.code, ErrorCode::BadRequest);
+    }
+
+    #[test]
+    fn match_frame_rejects_oversized_geometry() {
+        let (_dir, state) = test_state();
+        let response = state.dispatch(
+            RequestEnvelope::new(Request::MatchFrame {
+                username: "alice".to_owned(),
+                auth_scope: IpcAuthScope::Session,
+                frame: facegate_ipc::FrameProbe {
+                    format: facegate_ipc::FrameFormat::Gray8,
+                    width: 8192,
+                    height: 8192,
+                    bytes: vec![],
+                },
+            }),
+            Some(PeerCredentials { uid: 0 }),
+        );
+        let Response::Error(error) = response.response else {
+            panic!("expected error for oversized frame");
+        };
+        assert_eq!(error.code, ErrorCode::BadRequest);
+    }
+
+    #[test]
+    fn frame_from_probe_bgr_swaps_channels() {
+        let probe = facegate_ipc::FrameProbe {
+            format: facegate_ipc::FrameFormat::Bgr8,
+            width: 1,
+            height: 1,
+            bytes: vec![10, 20, 30], // B=10, G=20, R=30
+        };
+        let frame = frame_from_probe(&probe).expect("decode");
+        assert_eq!(frame.data, vec![30, 20, 10]); // RGB
+    }
+
+    #[test]
+    fn frame_from_probe_gray_expands_to_rgb() {
+        let probe = facegate_ipc::FrameProbe {
+            format: facegate_ipc::FrameFormat::Gray8,
+            width: 2,
+            height: 1,
+            bytes: vec![42, 200],
+        };
+        let frame = frame_from_probe(&probe).expect("decode");
+        assert_eq!(frame.data, vec![42, 42, 42, 200, 200, 200]);
     }
 
     #[test]

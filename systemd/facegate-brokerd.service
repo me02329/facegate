@@ -13,8 +13,11 @@ UMask=0077
 Restart=on-failure
 RestartSec=2
 
-# Broker hardening. The MVP broker does not need camera, model, network, home,
-# or device access because clients still capture frames and submit probes.
+# Broker hardening. The broker loads SCRFD + ArcFace ONNX models from
+# /usr/share/facegate/models (read-only via ProtectSystem=strict) and accepts
+# camera frames over the IPC socket — it does NOT open camera devices itself,
+# so PrivateDevices=yes stays. Network is unnecessary because all traffic is
+# over the local Unix socket.
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes

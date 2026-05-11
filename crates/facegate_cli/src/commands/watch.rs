@@ -7,10 +7,11 @@ use tokio::signal::unix::{signal, SignalKind};
 use zbus::proxy;
 use zbus::Connection;
 
+use facegate_core::camera::V4lCamera;
 use facegate_core::config::Config;
 use facegate_core::error::FaceRsError;
-use facegate_core::pipeline::FacePipeline;
 use facegate_core::storage::AuthScope;
+use facegate_ipc::{FrameFormat, FrameProbe};
 
 use crate::commands::broker;
 
@@ -196,8 +197,17 @@ fn run_recognition(
         return;
     }
 
-    let mut pipeline = match FacePipeline::new(config) {
-        Ok(p) => p,
+    let mut camera = match V4lCamera::open(
+        &config.camera.device,
+        config.camera.width,
+        config.camera.height,
+        config.camera.fps,
+        config.camera.timeout_ms,
+    ) {
+        Ok(mut cam) => {
+            cam.warmup(config.camera.warmup_frames);
+            cam
+        }
         Err(e) => {
             tracing::error!("cannot open camera: {e}");
             return;
@@ -213,9 +223,15 @@ fn run_recognition(
             return;
         }
 
-        match pipeline.capture_embedding(config) {
-            Ok(embedding) => {
-                match broker::match_embedding(username, AuthScope::Session, embedding) {
+        match camera.capture_frame() {
+            Ok(frame) => {
+                let probe = FrameProbe {
+                    format: FrameFormat::Rgb8,
+                    width: frame.width,
+                    height: frame.height,
+                    bytes: frame.data,
+                };
+                match broker::match_frame(username, AuthScope::Session, probe) {
                     Ok(result) if result.matched => {
                         matches += 1;
                         tracing::debug!(

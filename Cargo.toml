@@ -29,3 +29,4 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "net", "io-util"] }
 futures-util = "0.3"
 zeroize = "1"
+base64 = "0.22"

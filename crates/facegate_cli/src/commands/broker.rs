@@ -1,8 +1,8 @@
 use anyhow::{bail, Result};
 use facegate_core::storage::{AuthScope, EnrolledTemplate, TemplateScope};
 use facegate_ipc::{
-    send_request, AuditEvent, BrokerError, EnrolledTemplateSummary, ErrorCode, MatchResult,
-    Request, RequestEnvelope, Response, DEFAULT_SOCKET_PATH,
+    send_request, AuditEvent, BrokerError, EnrolledTemplateSummary, ErrorCode, FrameProbe,
+    MatchResult, Request, RequestEnvelope, Response, DEFAULT_SOCKET_PATH,
 };
 
 pub fn match_embedding(
@@ -16,14 +16,38 @@ pub fn match_embedding(
     }
 }
 
-pub fn match_embedding_for_auth(
+pub fn match_frame(
     username: &str,
     auth_scope: AuthScope,
-    probe_embedding: Vec<f32>,
+    frame: FrameProbe,
+) -> Result<MatchResult> {
+    let request = Request::MatchFrame {
+        username: username.to_owned(),
+        auth_scope: ipc_auth_scope(auth_scope),
+        frame,
+    };
+    match self::request(request)? {
+        Response::Match { result } => Ok(result),
+        other => bail!("unexpected broker response: {other:?}"),
+    }
+}
+
+/// Submit a raw frame to the broker for detection + embedding + match. This
+/// is the trust-bounded auth path: the client never computes the embedding,
+/// so a same-UID attacker cannot bypass live capture by feeding a synthetic
+/// vector. Used by `facegate auth` (PAM) and `facegate watch`.
+pub fn match_frame_for_auth(
+    username: &str,
+    auth_scope: AuthScope,
+    frame: FrameProbe,
 ) -> std::result::Result<MatchResult, BrokerAuthError> {
     let response = send_request(
         DEFAULT_SOCKET_PATH,
-        RequestEnvelope::new(match_request(username, auth_scope, probe_embedding)),
+        RequestEnvelope::new(Request::MatchFrame {
+            username: username.to_owned(),
+            auth_scope: ipc_auth_scope(auth_scope),
+            frame,
+        }),
     )?;
     match response.response {
         Response::Match { result } => Ok(result),

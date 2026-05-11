@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use facegate_core::config::Config;
@@ -242,7 +242,7 @@ fn current_username() -> Option<String> {
         .or_else(|| std::env::var("USER").ok().filter(|s| !s.is_empty()))
 }
 
-fn exists_label(path: &PathBuf) -> &'static str {
+fn exists_label(path: &Path) -> &'static str {
     if path.exists() {
         "present"
     } else {

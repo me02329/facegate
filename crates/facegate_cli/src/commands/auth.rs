@@ -1,37 +1,42 @@
+use facegate_core::camera::V4lCamera;
 use facegate_core::config::Config;
 use facegate_core::error::{AuthExitCode, FaceRsError};
-use facegate_core::pipeline::FacePipeline;
 use facegate_core::storage::AuthScope;
-use facegate_ipc::ErrorCode;
+use facegate_ipc::{ErrorCode, FrameFormat, FrameProbe};
 
 use crate::commands::broker;
 
 /// Non-interactive authentication called by the PAM module.
 /// Returns an exit code — caller must pass it to std::process::exit.
+///
+/// Since protocol v2 the client only captures frames; SCRFD + ArcFace and the
+/// match decision live inside facegate-brokerd, which means a same-UID
+/// attacker cannot bypass live capture by submitting a precomputed embedding.
 pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCode {
     tracing::info!("auth requested for '{username}'");
     let auth_scope = auth_scope_for_service(service);
 
-    // Open camera + load models.
-    let mut pipeline = match FacePipeline::new(config) {
-        Ok(p) => p,
+    let mut camera = match V4lCamera::open(
+        &config.camera.device,
+        config.camera.width,
+        config.camera.height,
+        config.camera.fps,
+        config.camera.timeout_ms,
+    ) {
+        Ok(mut cam) => {
+            cam.warmup(config.camera.warmup_frames);
+            cam
+        }
         Err(FaceRsError::Camera(msg)) => {
-            // Print to stderr so the error appears in journalctl / PAM logs.
-            // tracing is not initialised in auth mode, so this is the only trace.
             eprintln!("Facegate: camera error: {msg}");
             return if config.security.deny_on_camera_error {
                 AuthExitCode::CameraError
             } else {
-                // deny_on_camera_error = false → let PAM fall through to password
                 fallback_or_deny(config)
             };
         }
-        Err(FaceRsError::Detection(msg)) | Err(FaceRsError::Embedding(msg)) => {
-            eprintln!("Facegate: model error: {msg}");
-            return AuthExitCode::ConfigError;
-        }
         Err(e) => {
-            tracing::error!("pipeline init error: {e}");
+            tracing::error!("camera open error: {e}");
             return AuthExitCode::InternalError;
         }
     };
@@ -39,8 +44,8 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
     let mut matches = 0_u32;
     let mut saw_timeout = false;
     for attempt in 1..=config.recognition.max_attempts {
-        let embedding = match pipeline.capture_embedding(config) {
-            Ok(e) => e,
+        let frame = match camera.capture_frame() {
+            Ok(f) => f,
             Err(FaceRsError::Timeout) => {
                 saw_timeout = true;
                 tracing::warn!(attempt, "face auth timed out for '{username}'");
@@ -54,17 +59,20 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
                     fallback_or_deny(config)
                 };
             }
-            Err(FaceRsError::Detection(msg)) | Err(FaceRsError::Embedding(msg)) => {
-                tracing::error!("model inference error: {msg}");
-                return AuthExitCode::InternalError;
-            }
             Err(e) => {
                 tracing::error!("capture error: {e}");
                 return AuthExitCode::InternalError;
             }
         };
 
-        match broker::match_embedding_for_auth(username, auth_scope, embedding) {
+        let probe = FrameProbe {
+            format: FrameFormat::Rgb8,
+            width: frame.width,
+            height: frame.height,
+            bytes: frame.data,
+        };
+
+        match broker::match_frame_for_auth(username, auth_scope, probe) {
             Ok(result) if result.matched => {
                 matches += 1;
                 tracing::debug!(

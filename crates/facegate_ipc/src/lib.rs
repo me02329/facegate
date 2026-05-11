@@ -10,8 +10,12 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 pub const DEFAULT_SOCKET_PATH: &str = "/run/facegate/broker.sock";
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Upper bound on the size of a request line accepted by the broker. Frames
+/// dominate this budget — 1920x1080 RGB after base64 is roughly 8.3 MB, which
+/// fits below this cap; smaller IR captures use well under 1 MB.
+pub const MAX_REQUEST_BYTES: usize = 12 * 1024 * 1024;
 
 pub type Embedding = Vec<f32>;
 
@@ -132,7 +136,25 @@ pub struct FrameProbe {
     pub format: FrameFormat,
     pub width: u32,
     pub height: u32,
+    #[serde(with = "base64_bytes")]
     pub bytes: Vec<u8>,
+}
+
+mod base64_bytes {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        STANDARD
+            .decode(encoded.as_bytes())
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,6 +307,37 @@ mod tests {
         let encoded = encode_request(&req).expect("encode");
 
         assert_eq!(encoded.last(), Some(&b'\n'));
+    }
+
+    #[test]
+    fn frame_probe_round_trips_through_base64() {
+        let probe = FrameProbe {
+            format: FrameFormat::Rgb8,
+            width: 2,
+            height: 1,
+            bytes: vec![0, 1, 2, 253, 254, 255],
+        };
+        let envelope = RequestEnvelope::new(Request::MatchFrame {
+            username: "alice".to_owned(),
+            auth_scope: AuthScope::Session,
+            frame: probe.clone(),
+        });
+        let json = serde_json::to_string(&envelope).expect("serialize");
+        // bytes must be a base64 string, not a JSON int array.
+        assert!(
+            json.contains("\"bytes\":\""),
+            "bytes field not base64-encoded: {json}"
+        );
+        assert!(
+            !json.contains("\"bytes\":["),
+            "bytes field still a numeric array: {json}"
+        );
+
+        let decoded: RequestEnvelope = serde_json::from_str(&json).expect("deserialize");
+        let Request::MatchFrame { frame, .. } = decoded.request else {
+            panic!("expected MatchFrame after round-trip");
+        };
+        assert_eq!(frame, probe);
     }
 
     #[test]
