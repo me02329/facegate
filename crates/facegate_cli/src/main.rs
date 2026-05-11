@@ -25,6 +25,11 @@ enum Command {
     Configure,
     /// Print a compact installation and enrollment summary
     Status,
+    /// Guided first-time setup flow
+    Setup {
+        /// User to enroll; defaults to SUDO_USER or USER
+        username: Option<String>,
+    },
     /// Run diagnostics on the installation
     Doctor,
     /// Test camera capture and face detection
@@ -248,6 +253,7 @@ fn run_command(
     match cmd {
         Command::Configure => commands::configure::run(config, config_path),
         Command::Status => commands::status::run(&config, &config_path),
+        Command::Setup { username } => commands::setup::run(config, config_path, username),
         Command::Doctor => commands::doctor::run(&config),
         Command::CameraTest { device } => commands::camera_test::run(&config, device.as_deref()),
         Command::Cameras => commands::cameras::run(),

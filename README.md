@@ -249,6 +249,8 @@ systemctl --user enable --now facegate-watch
 |---|---|
 | *(none)* | Open the interactive TUI menu |
 | `configure` | Edit settings in a terminal UI |
+| `setup [USERNAME]` | Guided first-time setup flow |
+| `status` | Compact installation and enrollment summary |
 | `doctor` | Check installation status |
 | `cameras` | List `/dev/video*` and flag IR vs RGB |
 | `camera-test [--device DEV]` | Test camera and face detection |
@@ -259,8 +261,9 @@ systemctl --user enable --now facegate-watch
 | `session-auth` | Toggle face auth in login/session PAM services |
 | `completions SHELL` | Print shell completion script |
 
-All commands except `completions`, `cameras`, and the internal `watch`/`auth`
-helpers require root. `cameras` and `watch` run as the normal user.
+All commands except `completions`, `cameras`, `status`, and the internal
+`watch`/`auth` helpers require root. `cameras`, `status`, and `watch` run as
+the normal user.
 
 ---
 

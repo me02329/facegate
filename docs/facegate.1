@@ -11,6 +11,15 @@ facegate \- native facial authentication for Linux, including automatic screen u
 .RI [ --config " PATH" ]
 .YS
 .SY facegate
+.B setup
+.RI [ --config " PATH" ]
+.RI [ USERNAME ]
+.YS
+.SY facegate
+.B status
+.RI [ --config " PATH" ]
+.YS
+.SY facegate
 .B doctor
 .RI [ --config " PATH" ]
 .YS
@@ -104,6 +113,18 @@ to return to the previous screen or
 .B q
 to quit.
 .TP
+.B setup [\fIUSERNAME\fR]
+Run a guided first-time setup flow. The flow recommends a camera, backs up the
+configuration before writing changes, offers enrollment and recognition testing,
+and then offers sudo/session PAM and watch-daemon activation. Each mutating
+step asks for confirmation before it runs.
+.TP
+.B status
+Print a compact, non-mutating status summary: config parse status, broker
+socket health, selected camera, model file presence, template counts available
+through the broker, PAM enablement, watch service state, and recent authorized
+audit events. Runs without root and marks permission-limited checks clearly.
+.TP
 .B doctor
 Run installation diagnostics. Checks the configuration file, PAM module,
 storage directory, camera device, ONNX models, ONNX Runtime shared library,
@@ -160,18 +181,12 @@ authentication and vice versa.
 .B --for both
 is accepted by all flows.
 .PP
-When enrolling with
-.B --for session
-or
-.BR --for both ,
-the template directory is automatically transferred to the ownership of
-.I USERNAME
-so that
-.B facegate-watch
-(which runs as the user, not as root) can read the templates at runtime.
-The files remain
-.B 0600
-\(em no other user can read them.
+Enrolled templates are owned by the dedicated
+.B facegate
+system user and accessed through
+.BR facegate-brokerd .
+User-facing commands receive metadata or match decisions, not raw enrolled
+embedding vectors.
 .RE
 .TP
 .B session-auth
