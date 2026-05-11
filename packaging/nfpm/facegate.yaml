@@ -15,6 +15,11 @@ contents:
     file_info:
       mode: 0755
 
+  - src: target/release/facegate-brokerd
+    dst: /usr/bin/facegate-brokerd
+    file_info:
+      mode: 0755
+
   - src: target/release/libpam_facegate.so
     dst: /usr/lib/security/pam_facegate.so
     file_info:
@@ -28,6 +33,11 @@ contents:
 
   - src: systemd/facegate-watch.service
     dst: /usr/lib/systemd/user/facegate-watch.service
+    file_info:
+      mode: 0644
+
+  - src: systemd/facegate-brokerd.service
+    dst: /usr/lib/systemd/system/facegate-brokerd.service
     file_info:
       mode: 0644
 

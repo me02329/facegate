@@ -162,8 +162,8 @@ pub fn run_streaming(
     all_ok &= chk(
         tx,
         "storage permissions are safe",
-        safe_dir_permissions(&config.storage.base_dir),
-        Some("run: sudo chmod 755 /var/lib/facegate /var/lib/facegate/users"),
+        safe_template_storage(&config.storage.base_dir),
+        Some("run: sudo chown -R facegate:facegate /var/lib/facegate/users && sudo chmod 700 /var/lib/facegate/users"),
     );
     all_ok &= chk(
         tx,
@@ -258,8 +258,21 @@ pub fn run_streaming(
     Ok(())
 }
 
-fn safe_dir_permissions(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
+fn safe_template_storage(path: &Path) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let Ok(facegate_uid) = uid_for_user("facegate") else {
+        return false;
+    };
+    let Some(facegate_uid) = facegate_uid else {
+        return false;
+    };
+    let Ok(facegate_gid) = gid_for_group("facegate") else {
+        return false;
+    };
+    let Some(facegate_gid) = facegate_gid else {
+        return false;
+    };
 
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
@@ -267,7 +280,92 @@ fn safe_dir_permissions(path: &Path) -> bool {
     if !meta.file_type().is_dir() || meta.file_type().is_symlink() {
         return false;
     }
-    meta.permissions().mode() & 0o022 == 0
+    if meta.uid() != facegate_uid || meta.gid() != facegate_gid {
+        return false;
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        return false;
+    }
+
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            return false;
+        };
+        if meta.file_type().is_symlink() || meta.uid() != facegate_uid || meta.gid() != facegate_gid
+        {
+            return false;
+        }
+        let mode = meta.permissions().mode() & 0o777;
+        if meta.file_type().is_dir() {
+            if mode & 0o077 != 0 {
+                return false;
+            }
+            let embeddings = entry.path().join("embeddings.json");
+            if embeddings.exists() {
+                let Ok(file_meta) = std::fs::symlink_metadata(&embeddings) else {
+                    return false;
+                };
+                if !file_meta.file_type().is_file()
+                    || file_meta.file_type().is_symlink()
+                    || file_meta.uid() != facegate_uid
+                    || file_meta.gid() != facegate_gid
+                    || file_meta.permissions().mode() & 0o077 != 0
+                {
+                    return false;
+                }
+            }
+        } else if meta.file_type().is_file() {
+            if mode & 0o077 != 0 {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+fn uid_for_user(username: &str) -> anyhow::Result<Option<u32>> {
+    let c_name = std::ffi::CString::new(username)?;
+    let mut buf = vec![0i8; 4096];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getpwnam_r(
+            c_name.as_ptr(),
+            &mut pwd,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::from_raw_os_error(rc).into());
+    }
+    Ok((!result.is_null()).then_some(pwd.pw_uid))
+}
+
+fn gid_for_group(group: &str) -> anyhow::Result<Option<u32>> {
+    let c_name = std::ffi::CString::new(group)?;
+    let mut buf = vec![0i8; 4096];
+    let mut grp: libc::group = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::group = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getgrnam_r(
+            c_name.as_ptr(),
+            &mut grp,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::from_raw_os_error(rc).into());
+    }
+    Ok((!result.is_null()).then_some(grp.gr_gid))
 }
 
 fn chk(tx: &Sender<String>, label: &str, ok: bool, hint: Option<&str>) -> bool {

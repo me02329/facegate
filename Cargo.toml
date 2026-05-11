@@ -1,7 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/facegate_brokerd",
     "crates/facegate_core",
+    "crates/facegate_ipc",
     "crates/facegate_cli",
     "crates/pam_facegate",
 ]
@@ -24,5 +26,7 @@ image = "0.25"
 ort = { version = "2.0.0-rc.12", features = ["load-dynamic", "ndarray"] }
 ndarray = "0.17"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "net", "io-util"] }
 futures-util = "0.3"
+zeroize = "1"
+base64 = "0.22"

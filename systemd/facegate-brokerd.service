@@ -1,0 +1,52 @@
+[Unit]
+Description=Facegate biometric template broker
+Documentation=man:facegate(1)
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/facegate-brokerd
+User=facegate
+Group=facegate
+RuntimeDirectory=facegate
+RuntimeDirectoryMode=0755
+UMask=0077
+Restart=on-failure
+RestartSec=2
+
+# Broker hardening. The broker loads SCRFD + ArcFace ONNX models from
+# /usr/share/facegate/models (read-only via ProtectSystem=strict) and accepts
+# camera frames over the IPC socket — it does NOT open camera devices itself,
+# so PrivateDevices=yes stays. Network is unnecessary because all traffic is
+# over the local Unix socket.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+ReadWritePaths=/run/facegate /var/lib/facegate
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @privileged
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+IPAddressDeny=any
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

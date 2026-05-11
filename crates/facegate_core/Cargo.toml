@@ -1,6 +1,6 @@
 [package]
 name = "facegate_core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 
@@ -16,6 +16,7 @@ v4l = { workspace = true }
 image = { workspace = true }
 ort = { workspace = true }
 ndarray = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -54,6 +54,18 @@ pub struct LoggingConfig {
 pub struct SecurityConfig {
     pub allow_password_fallback: bool,
     pub deny_on_camera_error: bool,
+    #[serde(default = "default_cooldown_after_failures")]
+    pub cooldown_after_failures: u32,
+    #[serde(default = "default_cooldown_seconds")]
+    pub cooldown_seconds: u64,
+}
+
+fn default_cooldown_after_failures() -> u32 {
+    10
+}
+
+fn default_cooldown_seconds() -> u64 {
+    60
 }
 
 impl Default for Config {
@@ -87,6 +99,8 @@ impl Default for Config {
             security: SecurityConfig {
                 allow_password_fallback: true,
                 deny_on_camera_error: false,
+                cooldown_after_failures: default_cooldown_after_failures(),
+                cooldown_seconds: default_cooldown_seconds(),
             },
         }
     }
@@ -159,6 +173,16 @@ impl Config {
                 "recognition.min_face_size must be greater than zero".to_string(),
             ));
         }
+        if self.security.cooldown_after_failures == 0 {
+            return Err(FaceRsError::Config(
+                "security.cooldown_after_failures must be greater than zero".to_string(),
+            ));
+        }
+        if self.security.cooldown_seconds == 0 {
+            return Err(FaceRsError::Config(
+                "security.cooldown_seconds must be greater than zero".to_string(),
+            ));
+        }
         if self.models.detector.as_os_str().is_empty()
             || self.models.embedder.as_os_str().is_empty()
         {
@@ -193,6 +217,8 @@ mod tests {
         assert_eq!(cfg.camera.device, "/dev/video0");
         assert!(cfg.recognition.threshold > 0.0 && cfg.recognition.threshold < 1.0);
         assert!(cfg.security.allow_password_fallback);
+        assert_eq!(cfg.security.cooldown_after_failures, 10);
+        assert_eq!(cfg.security.cooldown_seconds, 60);
         cfg.validate().expect("default config validates");
     }
 
@@ -229,6 +255,16 @@ mod tests {
         let mut cfg = Config::default();
         cfg.recognition.required_matches = 2;
         cfg.recognition.max_attempts = 1;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_cooldown_policy() {
+        let mut cfg = Config::default();
+        cfg.security.cooldown_after_failures = 0;
+        assert!(cfg.validate().is_err());
+        cfg.security.cooldown_after_failures = 10;
+        cfg.security.cooldown_seconds = 0;
         assert!(cfg.validate().is_err());
     }
 }

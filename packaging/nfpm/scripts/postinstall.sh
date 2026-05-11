@@ -9,9 +9,55 @@ DETECTOR_SHA256="5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b9
 EMBEDDER_SHA256="4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43"
 
 # ── Directories + permissions ─────────────────────────────────────────────────
+if ! getent group facegate >/dev/null; then
+    groupadd --system facegate
+fi
+
+if [ -x /usr/sbin/nologin ]; then
+    facegate_nologin=/usr/sbin/nologin
+elif [ -x /sbin/nologin ]; then
+    facegate_nologin=/sbin/nologin
+else
+    facegate_nologin=/bin/false
+fi
+
+if ! id -u facegate >/dev/null 2>&1; then
+    useradd --system --no-create-home --gid facegate --shell "$facegate_nologin" facegate
+fi
+
+migrate_template_storage() {
+    local users_dir="/var/lib/facegate/users"
+
+    if [ -L "$users_dir" ]; then
+        echo "Warning: $users_dir is a symlink; leaving template storage untouched." >&2
+        return 0
+    fi
+    if [ ! -d "$users_dir" ]; then
+        install -d -m 0700 -o facegate -g facegate "$users_dir"
+        return 0
+    fi
+
+    while IFS= read -r path; do
+        echo "Warning: suspicious template path left untouched: $path" >&2
+    done < <(find -P "$users_dir" \( -type l -o -type p -o -type s -o -type b -o -type c \) -print 2>/dev/null)
+
+    chown facegate:facegate "$users_dir"
+    chmod 700 "$users_dir"
+
+    find -P "$users_dir" -type d -exec chown facegate:facegate {} +
+    find -P "$users_dir" -type d -exec chmod 700 {} +
+    find -P "$users_dir" -type f -name embeddings.json -exec chown facegate:facegate {} +
+    find -P "$users_dir" -type f -name embeddings.json -exec chmod 600 {} +
+}
+
 mkdir -p /etc/facegate "$MODELS_DIR" /var/lib/facegate/users
-chown -R root:root /etc/facegate /usr/share/facegate /var/lib/facegate
-chmod 755 /var/lib/facegate /var/lib/facegate/users
+chown -R root:root /etc/facegate /usr/share/facegate
+chown root:root /var/lib/facegate
+chmod 755 /var/lib/facegate
+migrate_template_storage
+touch /var/lib/facegate/audit.log 2>/dev/null || true
+chown facegate:facegate /var/lib/facegate/audit.log 2>/dev/null || true
+chmod 600 /var/lib/facegate/audit.log 2>/dev/null || true
 chmod 644 /etc/facegate/config.toml 2>/dev/null || true
 
 # ── Shell completions ─────────────────────────────────────────────────────────
@@ -22,10 +68,11 @@ facegate completions bash > /usr/share/bash-completion/completions/facegate 2>/d
 mkdir -p /usr/share/fish/vendor_completions.d
 facegate completions fish > /usr/share/fish/vendor_completions.d/facegate.fish 2>/dev/null || true
 
-# ── systemd user service ──────────────────────────────────────────────────────
-# Reload the system daemon so the new unit file is visible.
-# User instances pick it up automatically at next login.
+# ── systemd services ──────────────────────────────────────────────────────────
+# Reload the system daemon so the new units are visible. User instances pick up
+# the watch unit automatically at next login.
 systemctl daemon-reload 2>/dev/null || true
+systemctl enable --now facegate-brokerd.service 2>/dev/null || true
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

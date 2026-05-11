@@ -1,5 +1,7 @@
 pub mod add;
 pub mod auth;
+pub mod broker;
+pub mod calibrate;
 pub mod camera_test;
 pub mod cameras;
 pub mod configure;
@@ -8,6 +10,8 @@ pub mod list;
 pub mod pam_edit;
 pub mod remove;
 pub mod session_toggle;
+pub mod setup;
+pub mod status;
 pub mod sudo_toggle;
 pub mod test;
 pub mod watch;

@@ -7,11 +7,13 @@ use tokio::signal::unix::{signal, SignalKind};
 use zbus::proxy;
 use zbus::Connection;
 
+use facegate_core::camera::V4lCamera;
 use facegate_core::config::Config;
 use facegate_core::error::FaceRsError;
-use facegate_core::matching::is_match;
-use facegate_core::pipeline::FacePipeline;
-use facegate_core::storage::{AuthScope, TemplateStore};
+use facegate_core::storage::AuthScope;
+use facegate_ipc::{FrameFormat, FrameProbe};
+
+use crate::commands::broker;
 
 // ── D-Bus proxies ─────────────────────────────────────────────────────────────
 
@@ -176,15 +178,17 @@ fn run_recognition(
     session: &Login1SessionProxy,
     cancel: &AtomicBool,
 ) {
-    let store = TemplateStore::new(&config.storage.base_dir);
-    let enrolled = match store.embeddings_for_scope(username, AuthScope::Session) {
-        Ok(e) if !e.is_empty() => e,
-        Ok(_) | Err(FaceRsError::NotEnrolled) => {
+    match broker::list_templates(username) {
+        Ok(templates)
+            if templates
+                .iter()
+                .any(|template| broker::summary_allows(template, AuthScope::Session)) => {}
+        Ok(_) => {
             tracing::warn!(username, "no session templates — skipping face scan");
             return;
         }
         Err(e) => {
-            tracing::error!(username, "template load error: {e}");
+            tracing::error!(username, "broker template list error: {e}");
             return;
         }
     };
@@ -193,15 +197,23 @@ fn run_recognition(
         return;
     }
 
-    let mut pipeline = match FacePipeline::new(config) {
-        Ok(p) => p,
+    let mut camera = match V4lCamera::open(
+        &config.camera.device,
+        config.camera.width,
+        config.camera.height,
+        config.camera.fps,
+        config.camera.timeout_ms,
+    ) {
+        Ok(mut cam) => {
+            cam.warmup(config.camera.warmup_frames);
+            cam
+        }
         Err(e) => {
             tracing::error!("cannot open camera: {e}");
             return;
         }
     };
 
-    let threshold = config.recognition.threshold;
     let required = config.recognition.required_matches.max(1);
     let mut matches: u32 = 0;
 
@@ -211,22 +223,48 @@ fn run_recognition(
             return;
         }
 
-        match pipeline.capture_embedding(config) {
-            Ok(embedding) => {
-                if is_match(&embedding, &enrolled, threshold) {
-                    matches += 1;
-                    tracing::debug!(attempt, matches, required, username, "match accepted");
-                    if matches >= required {
-                        tracing::info!(username, "face recognised — unlocking session");
-                        // Use the async D-Bus proxy from a blocking context.
-                        let result = tokio::runtime::Handle::current().block_on(session.unlock());
-                        if let Err(e) = result {
-                            tracing::error!("unlock call failed: {e}");
+        match camera.capture_frame() {
+            Ok(frame) => {
+                let probe = FrameProbe {
+                    format: FrameFormat::Rgb8,
+                    width: frame.width,
+                    height: frame.height,
+                    bytes: frame.data,
+                };
+                match broker::match_frame(username, AuthScope::Session, probe) {
+                    Ok(result) if result.matched => {
+                        matches += 1;
+                        tracing::debug!(
+                            attempt,
+                            matches,
+                            required,
+                            username,
+                            score = result.score,
+                            "match accepted"
+                        );
+                        if matches >= required {
+                            tracing::info!(username, "face recognised — unlocking session");
+                            // Use the async D-Bus proxy from a blocking context.
+                            let result =
+                                tokio::runtime::Handle::current().block_on(session.unlock());
+                            if let Err(e) = result {
+                                tracing::error!("unlock call failed: {e}");
+                            }
+                            return;
                         }
+                    }
+                    Ok(result) => {
+                        tracing::debug!(
+                            attempt,
+                            username,
+                            score = result.score,
+                            "attempt did not match"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("broker match error: {e}");
                         return;
                     }
-                } else {
-                    tracing::debug!(attempt, username, "attempt did not match");
                 }
             }
             Err(FaceRsError::Timeout) => {

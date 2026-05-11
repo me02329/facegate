@@ -23,6 +23,13 @@ struct Cli {
 enum Command {
     /// Interactive TUI configuration editor
     Configure,
+    /// Print a compact installation and enrollment summary
+    Status,
+    /// Guided first-time setup flow
+    Setup {
+        /// User to enroll; defaults to SUDO_USER or USER
+        username: Option<String>,
+    },
     /// Run diagnostics on the installation
     Doctor,
     /// Test camera capture and face detection
@@ -60,6 +67,19 @@ enum Command {
         #[arg(long = "for", value_enum, default_value_t = TestPurpose::All)]
         purpose: TestPurpose,
     },
+    /// Capture positive samples and recommend a recognition threshold
+    Calibrate {
+        username: String,
+        /// Which scope to calibrate (defaults to "session")
+        #[arg(long = "for", value_enum, default_value_t = CalibrationPurpose::Session)]
+        purpose: CalibrationPurpose,
+        /// Number of positive samples to capture
+        #[arg(long, default_value_t = 5)]
+        samples: u32,
+        /// Offer to write the recommended threshold to the config
+        #[arg(long)]
+        write: bool,
+    },
     /// Authenticate a user — used internally by the PAM module
     #[command(hide = true)]
     Auth {
@@ -92,6 +112,21 @@ enum TestPurpose {
     Session,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CalibrationPurpose {
+    Sudo,
+    Session,
+}
+
+impl From<CalibrationPurpose> for facegate_core::storage::AuthScope {
+    fn from(value: CalibrationPurpose) -> Self {
+        match value {
+            CalibrationPurpose::Sudo => facegate_core::storage::AuthScope::Sudo,
+            CalibrationPurpose::Session => facegate_core::storage::AuthScope::Session,
+        }
+    }
+}
+
 impl From<TestPurpose> for commands::test::TestScope {
     fn from(value: TestPurpose) -> Self {
         use facegate_core::storage::AuthScope;
@@ -117,6 +152,7 @@ fn main() {
     let cli = Cli::parse();
     let auth_mode = matches!(&cli.command, Some(Command::Auth { .. }));
     let watch_mode = matches!(&cli.command, Some(Command::Watch));
+    let status_mode = matches!(&cli.command, Some(Command::Status));
     // `cameras` only opens /dev/video* in read-only-ish ways; it should be
     // runnable as a normal user so people can discover their IR camera before
     // running anything privileged.
@@ -132,10 +168,10 @@ fn main() {
         return;
     }
 
-    // Auth, watch, and the read-only `cameras` listing run as an unprivileged
-    // user. Every other command touches sensitive face data or system config,
-    // so we require root.
-    if !auth_mode && !watch_mode && !cameras_mode {
+    // Auth, watch, status, and the read-only `cameras` listing run as an
+    // unprivileged user. Every other command touches sensitive face data or
+    // system config, so we require root.
+    if !auth_mode && !watch_mode && !status_mode && !cameras_mode {
         // SAFETY: geteuid() is always safe to call.
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("Error: facegate must be run as root (e.g. sudo facegate).");
@@ -204,7 +240,9 @@ enum ConfigPolicy {
 fn config_policy(command: &Option<Command>) -> ConfigPolicy {
     match command {
         Some(Command::Auth { .. }) => ConfigPolicy::StrictSilent,
-        Some(Command::Configure) | Some(Command::Doctor) | None => ConfigPolicy::DefaultOnError,
+        Some(Command::Configure) | Some(Command::Doctor) | Some(Command::Status) | None => {
+            ConfigPolicy::DefaultOnError
+        }
         // `cameras` does not need a config at all (it walks /dev/video*),
         // so don't fail if /etc/facegate/config.toml is missing.
         Some(Command::Watch) | Some(Command::Cameras) => ConfigPolicy::DefaultOnError,
@@ -242,6 +280,8 @@ fn run_command(
 ) -> anyhow::Result<()> {
     match cmd {
         Command::Configure => commands::configure::run(config, config_path),
+        Command::Status => commands::status::run(&config, &config_path),
+        Command::Setup { username } => commands::setup::run(config, config_path, username),
         Command::Doctor => commands::doctor::run(&config),
         Command::CameraTest { device } => commands::camera_test::run(&config, device.as_deref()),
         Command::Cameras => commands::cameras::run(),
@@ -263,6 +303,19 @@ fn run_command(
         Command::Test { username, purpose } => {
             commands::test::run(&config, &username, purpose.into())
         }
+        Command::Calibrate {
+            username,
+            purpose,
+            samples,
+            write,
+        } => commands::calibrate::run(
+            config,
+            config_path,
+            &username,
+            purpose.into(),
+            samples,
+            write,
+        ),
         Command::Auth { user, service } => {
             std::process::exit(commands::auth::run(&config, &user, service.as_deref()) as i32);
         }

@@ -678,17 +678,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "facegate_brokerd"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "facegate_core",
+ "facegate_ipc",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zeroize",
+]
+
+[[package]]
 name = "facegate_cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
  "crossterm",
  "facegate_core",
+ "facegate_ipc",
  "futures-util",
  "libc",
  "ratatui",
+ "thiserror",
  "tokio",
  "toml",
  "tracing",
@@ -699,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "facegate_core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "image",
@@ -713,6 +731,17 @@ dependencies = [
  "toml",
  "tracing",
  "v4l",
+ "zeroize",
+]
+
+[[package]]
+name = "facegate_ipc"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -1514,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "pam_facegate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
 ]

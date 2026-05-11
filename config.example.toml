@@ -41,3 +41,5 @@ log_failed_attempts = true
 [security]
 allow_password_fallback = true
 deny_on_camera_error = false
+cooldown_after_failures = 10
+cooldown_seconds = 60

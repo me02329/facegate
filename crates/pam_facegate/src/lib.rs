@@ -24,6 +24,10 @@ const PAM_IGNORE: c_int = 25;
 /// facegate auth exit codes (must match facegate_core::error::AuthExitCode)
 const EXIT_RECOGNIZED: c_int = 0;
 const EXIT_NOT_RECOGNIZED: c_int = 1;
+const EXIT_TIMEOUT: c_int = 2;
+const EXIT_CAMERA_ERROR: c_int = 3;
+const EXIT_CONFIG_ERROR: c_int = 4;
+const EXIT_INTERNAL_ERROR: c_int = 5;
 const EXIT_DENIED: c_int = 6;
 
 /// Default helper binary path (overridable via `pam_facegate.so path=...`).
@@ -58,9 +62,34 @@ pub unsafe extern "C" fn pam_sm_authenticate(
     let helper = args.helper_path.as_deref().unwrap_or(DEFAULT_HELPER_PATH);
     match run_auth_helper(helper, &username, service.as_deref()) {
         Ok(EXIT_RECOGNIZED) => PAM_SUCCESS,
-        Ok(EXIT_NOT_RECOGNIZED) => PAM_IGNORE,
+        Ok(EXIT_NOT_RECOGNIZED) => {
+            send_info(pamh, "[ facegate ] Face not recognized; use password.");
+            PAM_IGNORE
+        }
+        Ok(EXIT_TIMEOUT) => {
+            send_info(pamh, "[ facegate ] Face scan timed out; use password.");
+            PAM_IGNORE
+        }
+        Ok(EXIT_CAMERA_ERROR) => {
+            send_info(pamh, "[ facegate ] Camera unavailable; use password.");
+            PAM_IGNORE
+        }
+        Ok(EXIT_CONFIG_ERROR) => {
+            send_info(
+                pamh,
+                "[ facegate ] Configuration/model error; use password.",
+            );
+            PAM_IGNORE
+        }
+        Ok(EXIT_INTERNAL_ERROR) => {
+            send_info(pamh, "[ facegate ] Facegate unavailable; use password.");
+            PAM_IGNORE
+        }
         Ok(EXIT_DENIED) => PAM_AUTH_ERR,
-        Ok(_) => PAM_AUTH_ERR,
+        Ok(_) => {
+            send_info(pamh, "[ facegate ] Facegate unavailable; use password.");
+            PAM_AUTH_ERR
+        }
         Err(_) => PAM_IGNORE, // helper failed to run → fall through to next PAM module
     }
 }

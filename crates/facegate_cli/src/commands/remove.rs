@@ -1,11 +1,12 @@
 use anyhow::{bail, Result};
 use facegate_core::config::Config;
-use facegate_core::storage::TemplateStore;
+
+use crate::commands::broker;
 
 pub fn run(config: &Config, username: &str, id: u32) -> Result<()> {
+    let _ = config;
     require_root()?;
-    let store = TemplateStore::new(&config.storage.base_dir);
-    store.remove_template(username, id)?;
+    broker::remove_template(username, id)?;
     println!("Removed template {id} for user '{username}'.");
     Ok(())
 }
