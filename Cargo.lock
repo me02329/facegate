@@ -678,6 +678,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "facegate_brokerd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "facegate_ipc",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "facegate_cli"
 version = "0.1.0"
 dependencies = [
@@ -713,6 +725,14 @@ dependencies = [
  "toml",
  "tracing",
  "v4l",
+]
+
+[[package]]
+name = "facegate_ipc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

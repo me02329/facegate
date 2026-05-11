@@ -1,0 +1,50 @@
+[Unit]
+Description=Facegate biometric template broker
+Documentation=man:facegate(1)
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/facegate-brokerd
+User=facegate
+Group=facegate
+RuntimeDirectory=facegate
+RuntimeDirectoryMode=0750
+UMask=0077
+Restart=on-failure
+RestartSec=2
+
+# Broker hardening. The MVP broker does not need camera, model, network, home,
+# or device access because clients still capture frames and submit probes.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+ReadWritePaths=/run/facegate
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @privileged
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+IPAddressDeny=any
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target
+
