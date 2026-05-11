@@ -2,6 +2,7 @@ use facegate_core::config::Config;
 use facegate_core::error::{AuthExitCode, FaceRsError};
 use facegate_core::pipeline::FacePipeline;
 use facegate_core::storage::AuthScope;
+use facegate_ipc::ErrorCode;
 
 use crate::commands::broker;
 
@@ -25,6 +26,10 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
                 fallback_or_deny(config)
             };
         }
+        Err(FaceRsError::Detection(msg)) | Err(FaceRsError::Embedding(msg)) => {
+            eprintln!("Facegate: model error: {msg}");
+            return AuthExitCode::ConfigError;
+        }
         Err(e) => {
             tracing::error!("pipeline init error: {e}");
             return AuthExitCode::InternalError;
@@ -32,10 +37,12 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
     };
 
     let mut matches = 0_u32;
+    let mut saw_timeout = false;
     for attempt in 1..=config.recognition.max_attempts {
         let embedding = match pipeline.capture_embedding(config) {
             Ok(e) => e,
             Err(FaceRsError::Timeout) => {
+                saw_timeout = true;
                 tracing::warn!(attempt, "face auth timed out for '{username}'");
                 continue;
             }
@@ -47,13 +54,17 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
                     fallback_or_deny(config)
                 };
             }
+            Err(FaceRsError::Detection(msg)) | Err(FaceRsError::Embedding(msg)) => {
+                tracing::error!("model inference error: {msg}");
+                return AuthExitCode::InternalError;
+            }
             Err(e) => {
                 tracing::error!("capture error: {e}");
                 return AuthExitCode::InternalError;
             }
         };
 
-        match broker::match_embedding(username, auth_scope, embedding) {
+        match broker::match_embedding_for_auth(username, auth_scope, embedding) {
             Ok(result) if result.matched => {
                 matches += 1;
                 tracing::debug!(
@@ -79,12 +90,14 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
                 }
             }
             Err(e) => {
-                tracing::error!("broker match error: {e}");
-                return AuthExitCode::InternalError;
+                return handle_broker_error(config, username, e);
             }
         }
     }
 
+    if saw_timeout {
+        return timeout_or_deny(config);
+    }
     fallback_or_deny(config)
 }
 
@@ -100,5 +113,39 @@ fn fallback_or_deny(config: &Config) -> AuthExitCode {
         AuthExitCode::NotRecognized
     } else {
         AuthExitCode::Denied
+    }
+}
+
+fn timeout_or_deny(config: &Config) -> AuthExitCode {
+    if config.security.allow_password_fallback {
+        AuthExitCode::Timeout
+    } else {
+        AuthExitCode::Denied
+    }
+}
+
+fn handle_broker_error(
+    config: &Config,
+    username: &str,
+    error: broker::BrokerAuthError,
+) -> AuthExitCode {
+    match error {
+        broker::BrokerAuthError::Broker(broker_error)
+            if matches!(
+                broker_error.code,
+                ErrorCode::NotEnrolled | ErrorCode::RateLimited | ErrorCode::LockedOut
+            ) =>
+        {
+            tracing::warn!(
+                username,
+                code = ?broker_error.code,
+                "face auth unavailable for user"
+            );
+            fallback_or_deny(config)
+        }
+        other => {
+            tracing::error!("broker match error: {other}");
+            AuthExitCode::InternalError
+        }
     }
 }

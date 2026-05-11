@@ -706,6 +706,7 @@ dependencies = [
  "futures-util",
  "libc",
  "ratatui",
+ "thiserror",
  "tokio",
  "toml",
  "tracing",

@@ -1,8 +1,8 @@
 use anyhow::{bail, Result};
 use facegate_core::storage::{AuthScope, EnrolledTemplate, TemplateScope};
 use facegate_ipc::{
-    send_request, EnrolledTemplateSummary, ErrorCode, MatchResult, Request, RequestEnvelope,
-    Response, DEFAULT_SOCKET_PATH,
+    send_request, BrokerError, EnrolledTemplateSummary, ErrorCode, MatchResult, Request,
+    RequestEnvelope, Response, DEFAULT_SOCKET_PATH,
 };
 
 pub fn match_embedding(
@@ -14,6 +14,32 @@ pub fn match_embedding(
         Response::Match { result } => Ok(result),
         other => bail!("unexpected broker response: {other:?}"),
     }
+}
+
+pub fn match_embedding_for_auth(
+    username: &str,
+    auth_scope: AuthScope,
+    probe_embedding: Vec<f32>,
+) -> std::result::Result<MatchResult, BrokerAuthError> {
+    let response = send_request(
+        DEFAULT_SOCKET_PATH,
+        RequestEnvelope::new(match_request(username, auth_scope, probe_embedding)),
+    )?;
+    match response.response {
+        Response::Match { result } => Ok(result),
+        Response::Error(error) => Err(BrokerAuthError::Broker(error)),
+        other => Err(BrokerAuthError::Unexpected(format!("{other:?}"))),
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BrokerAuthError {
+    #[error(transparent)]
+    Client(#[from] facegate_ipc::ClientError),
+    #[error("broker error {:?}: {}", .0.code, .0.message)]
+    Broker(BrokerError),
+    #[error("unexpected broker response: {0}")]
+    Unexpected(String),
 }
 
 pub fn match_embedding_optional(
