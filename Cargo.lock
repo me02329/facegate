@@ -682,8 +682,11 @@ name = "facegate_brokerd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "facegate_core",
  "facegate_ipc",
+ "libc",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
