@@ -51,6 +51,34 @@ pub struct BrokerInfo {
     pub broker_version: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditEvent {
+    pub timestamp_unix: u64,
+    pub username: String,
+    pub auth_scope: AuthScope,
+    pub outcome: AuditOutcome,
+    pub reason: AuditReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditOutcome {
+    Success,
+    Failure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditReason {
+    Matched,
+    Mismatch,
+    NotEnrolled,
+    RateLimited,
+    LockedOut,
+    Unauthorized,
+    Internal,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RequestEnvelope {
     pub version: u16,
@@ -70,6 +98,10 @@ impl RequestEnvelope {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     Health,
+    AuditRecent {
+        username: Option<String>,
+        limit: u32,
+    },
     Match {
         username: String,
         auth_scope: AuthScope,
@@ -138,6 +170,9 @@ impl ResponseEnvelope {
 pub enum Response {
     Health {
         info: BrokerInfo,
+    },
+    Audit {
+        events: Vec<AuditEvent>,
     },
     Match {
         result: MatchResult,

@@ -1,8 +1,8 @@
 use anyhow::{bail, Result};
 use facegate_core::storage::{AuthScope, EnrolledTemplate, TemplateScope};
 use facegate_ipc::{
-    send_request, BrokerError, EnrolledTemplateSummary, ErrorCode, MatchResult, Request,
-    RequestEnvelope, Response, DEFAULT_SOCKET_PATH,
+    send_request, AuditEvent, BrokerError, EnrolledTemplateSummary, ErrorCode, MatchResult,
+    Request, RequestEnvelope, Response, DEFAULT_SOCKET_PATH,
 };
 
 pub fn match_embedding(
@@ -95,6 +95,13 @@ pub fn remove_template(username: &str, template_id: u32) -> Result<()> {
         template_id,
     })? {
         Response::Removed => Ok(()),
+        other => bail!("unexpected broker response: {other:?}"),
+    }
+}
+
+pub fn audit_recent(username: Option<String>, limit: u32) -> Result<Vec<AuditEvent>> {
+    match request(Request::AuditRecent { username, limit })? {
+        Response::Audit { events } => Ok(events),
         other => bail!("unexpected broker response: {other:?}"),
     }
 }

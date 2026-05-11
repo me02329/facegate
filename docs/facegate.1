@@ -405,6 +405,11 @@ Default face embedding model (ArcFace W600K R50).
 .I /var/lib/facegate/users/\fIUSERNAME\fP/embeddings.json
 Stored face templates for a user. Permissions: 0600, owned by
 .IR USERNAME .
+.TP
+.I /var/lib/facegate/audit.log
+Local JSONL audit log written by the broker. Contains timestamp, username,
+auth scope, coarse outcome, and coarse reason. It does not contain images,
+embeddings, or similarity scores.
 .SH EXAMPLES
 .TP
 Open the interactive menu:

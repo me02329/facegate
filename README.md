@@ -345,6 +345,10 @@ Facegate is a **convenience authentication mechanism**. It is designed to reduce
 
 All processing happens on your machine. Face embeddings are computed locally by ONNX Runtime. No image, embedding, or identity data is ever sent over the network. There is no telemetry.
 
+### Local audit log
+
+Facegate keeps a local, privacy-preserving audit log at `/var/lib/facegate/audit.log`. The broker records timestamp, username, auth scope, coarse outcome, and coarse reason. It does not log images, embeddings, or face similarity scores. Writes are best-effort and never required for authentication to complete. `facegate status` shows recent events when the broker authorizes access.
+
 ### Template storage
 
 Face templates are stored as ArcFace embedding vectors — compact biometric templates derived from face images. They are not photographs, but they are sensitive biometric data. Published model-inversion and template-inversion techniques can sometimes produce face-like images or transferable biometric artifacts from embeddings, so Facegate treats templates as secrets.

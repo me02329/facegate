@@ -17,10 +17,34 @@ pub fn run(config: &Config, config_path: &Path) -> anyhow::Result<()> {
     print_camera(config);
     print_models(config);
     print_templates(config);
+    print_audit();
     print_auth();
     print_watch();
 
     Ok(())
+}
+
+fn print_audit() {
+    println!("Audit");
+    let username = current_username();
+    match broker::audit_recent(username, 5) {
+        Ok(events) if events.is_empty() => println!("  recent : none"),
+        Ok(events) => {
+            println!("  recent :");
+            for event in events {
+                println!(
+                    "           - {} user={} scope={:?} outcome={:?} reason={:?}",
+                    event.timestamp_unix,
+                    event.username,
+                    event.auth_scope,
+                    event.outcome,
+                    event.reason
+                );
+            }
+        }
+        Err(e) => println!("  recent : unavailable ({e})"),
+    }
+    println!();
 }
 
 fn print_config(config: &Config, config_path: &Path) {

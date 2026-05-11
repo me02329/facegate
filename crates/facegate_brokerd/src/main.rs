@@ -1,5 +1,6 @@
 use std::ffi::CString;
 use std::fs;
+use std::io::{BufRead, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -11,8 +12,8 @@ use facegate_core::error::FaceRsError;
 use facegate_core::matching::cosine_similarity;
 use facegate_core::storage::{AuthScope, TemplateScope, TemplateStore};
 use facegate_ipc::{
-    encode_response, BrokerInfo, EnrolledTemplateSummary, ErrorCode, MatchResult, Request,
-    RequestEnvelope, Response, ResponseEnvelope, PROTOCOL_VERSION,
+    encode_response, AuditEvent, AuditOutcome, AuditReason, BrokerInfo, EnrolledTemplateSummary,
+    ErrorCode, MatchResult, Request, RequestEnvelope, Response, ResponseEnvelope, PROTOCOL_VERSION,
 };
 use std::os::unix::fs::FileTypeExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -137,6 +138,7 @@ async fn handle_client(
 #[derive(Debug, Clone)]
 struct BrokerState {
     storage_base_dir: PathBuf,
+    audit_path: PathBuf,
     threshold: f32,
     cooldown_after_failures: u32,
     cooldown_duration: Duration,
@@ -145,8 +147,15 @@ struct BrokerState {
 
 impl BrokerState {
     fn from_config(config: Config) -> Self {
+        let audit_path = config
+            .storage
+            .base_dir
+            .parent()
+            .map(|path| path.join("audit.log"))
+            .unwrap_or_else(|| PathBuf::from("/var/lib/facegate/audit.log"));
         Self {
             storage_base_dir: config.storage.base_dir,
+            audit_path,
             threshold: config.recognition.threshold,
             cooldown_after_failures: config.security.cooldown_after_failures,
             cooldown_duration: Duration::from_secs(config.security.cooldown_seconds),
@@ -176,6 +185,7 @@ impl BrokerState {
                     broker_version: env!("CARGO_PKG_VERSION").to_owned(),
                 },
             }),
+            Request::AuditRecent { username, limit } => self.audit_recent(peer, username, limit),
             Request::Match {
                 username,
                 auth_scope,
@@ -230,14 +240,29 @@ impl BrokerState {
         probe_embedding: &[f32],
     ) -> ResponseEnvelope {
         if !authorized_for_match(peer, username, auth_scope) {
+            self.write_audit(
+                username,
+                auth_scope,
+                AuditOutcome::Failure,
+                AuditReason::Unauthorized,
+            );
             return unauthorized();
         }
         let Some(peer) = peer else {
+            self.write_audit(
+                username,
+                auth_scope,
+                AuditOutcome::Failure,
+                AuditReason::Unauthorized,
+            );
             return unauthorized();
         };
         match self.check_match_allowed(peer, username) {
             Ok(()) => {}
-            Err(error) => return error,
+            Err((error, reason)) => {
+                self.write_audit(username, auth_scope, AuditOutcome::Failure, reason);
+                return error;
+            }
         }
 
         let store = self.store();
@@ -245,6 +270,12 @@ impl BrokerState {
             Ok(store) => store.templates,
             Err(e) => {
                 self.record_match_failure(username);
+                self.write_audit(
+                    username,
+                    auth_scope,
+                    AuditOutcome::Failure,
+                    AuditReason::Internal,
+                );
                 return storage_error(e);
             }
         };
@@ -266,6 +297,12 @@ impl BrokerState {
         let Some((template_id, score)) = best else {
             self.zeroize_templates(&mut templates);
             self.record_match_failure(username);
+            self.write_audit(
+                username,
+                auth_scope,
+                AuditOutcome::Failure,
+                AuditReason::NotEnrolled,
+            );
             return ResponseEnvelope::error(
                 ErrorCode::NotEnrolled,
                 "user has no enrolled templates",
@@ -275,8 +312,20 @@ impl BrokerState {
         self.zeroize_templates(&mut templates);
         if matched {
             self.record_match_success(username);
+            self.write_audit(
+                username,
+                auth_scope,
+                AuditOutcome::Success,
+                AuditReason::Matched,
+            );
         } else {
             self.record_match_failure(username);
+            self.write_audit(
+                username,
+                auth_scope,
+                AuditOutcome::Failure,
+                AuditReason::Mismatch,
+            );
         }
         ResponseEnvelope::ok(Response::Match {
             result: MatchResult {
@@ -364,7 +413,7 @@ impl BrokerState {
         &self,
         peer: PeerCredentials,
         username: &str,
-    ) -> std::result::Result<(), ResponseEnvelope> {
+    ) -> std::result::Result<(), (ResponseEnvelope, AuditReason)> {
         let mut abuse = self.abuse.lock().unwrap_or_else(|e| e.into_inner());
         abuse.check_match_allowed(peer.uid, username)
     }
@@ -382,6 +431,77 @@ impl BrokerState {
             self.cooldown_duration,
         );
     }
+
+    fn audit_recent(
+        &self,
+        peer: Option<PeerCredentials>,
+        username: Option<String>,
+        limit: u32,
+    ) -> ResponseEnvelope {
+        let Some(peer) = peer else {
+            return unauthorized();
+        };
+        let filter_user = match username {
+            Some(username)
+                if peer.uid == 0
+                    || uid_for_username(&username).ok().flatten() == Some(peer.uid) =>
+            {
+                Some(username)
+            }
+            Some(_) => return unauthorized(),
+            None if peer.uid == 0 => None,
+            None => return unauthorized(),
+        };
+
+        let events = self
+            .read_audit_events(filter_user.as_deref(), limit.clamp(1, 50) as usize)
+            .unwrap_or_default();
+        ResponseEnvelope::ok(Response::Audit { events })
+    }
+
+    fn write_audit(
+        &self,
+        username: &str,
+        auth_scope: AuthScope,
+        outcome: AuditOutcome,
+        reason: AuditReason,
+    ) {
+        let event = AuditEvent {
+            timestamp_unix: unix_now(),
+            username: username.to_owned(),
+            auth_scope: ipc_auth_scope(auth_scope),
+            outcome,
+            reason,
+        };
+        let Ok(mut line) = serde_json::to_string(&event) else {
+            return;
+        };
+        line.push('\n');
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.audit_path)
+        {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+
+    fn read_audit_events(
+        &self,
+        username: Option<&str>,
+        limit: usize,
+    ) -> std::io::Result<Vec<AuditEvent>> {
+        let file = fs::File::open(&self.audit_path)?;
+        let reader = std::io::BufReader::new(file);
+        let mut events = reader
+            .lines()
+            .map_while(std::result::Result::ok)
+            .filter_map(|line| serde_json::from_str::<AuditEvent>(&line).ok())
+            .filter(|event| username.map(|u| event.username == u).unwrap_or(true))
+            .collect::<Vec<_>>();
+        let keep_from = events.len().saturating_sub(limit);
+        Ok(events.split_off(keep_from))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -395,7 +515,7 @@ impl AbuseState {
         &mut self,
         peer_uid: u32,
         username: &str,
-    ) -> std::result::Result<(), ResponseEnvelope> {
+    ) -> std::result::Result<(), (ResponseEnvelope, AuditReason)> {
         let now = Instant::now();
         let peer = self
             .peer_limits
@@ -409,9 +529,9 @@ impl AbuseState {
             peer.count = 0;
         }
         if peer.count >= RATE_LIMIT_MAX_MATCHES {
-            return Err(ResponseEnvelope::error(
-                ErrorCode::RateLimited,
-                "too many match requests",
+            return Err((
+                ResponseEnvelope::error(ErrorCode::RateLimited, "too many match requests"),
+                AuditReason::RateLimited,
             ));
         }
         peer.count += 1;
@@ -426,9 +546,9 @@ impl AbuseState {
             });
         if let Some(locked_until) = failure.locked_until {
             if now < locked_until {
-                return Err(ResponseEnvelope::error(
-                    ErrorCode::LockedOut,
-                    "too many failed match attempts",
+                return Err((
+                    ResponseEnvelope::error(ErrorCode::LockedOut, "too many failed match attempts"),
+                    AuditReason::LockedOut,
                 ));
             }
             failure.locked_until = None;
@@ -566,6 +686,13 @@ fn core_auth_scope(value: facegate_ipc::AuthScope) -> AuthScope {
     }
 }
 
+fn ipc_auth_scope(value: AuthScope) -> facegate_ipc::AuthScope {
+    match value {
+        AuthScope::Sudo => facegate_ipc::AuthScope::Sudo,
+        AuthScope::Session => facegate_ipc::AuthScope::Session,
+    }
+}
+
 fn core_template_scope(value: facegate_ipc::TemplateScope) -> TemplateScope {
     match value {
         facegate_ipc::TemplateScope::Sudo => TemplateScope::Sudo,
@@ -582,6 +709,13 @@ fn ipc_template_scope(value: TemplateScope) -> facegate_ipc::TemplateScope {
     }
 }
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,6 +730,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let state = BrokerState {
             storage_base_dir: dir.path().to_owned(),
+            audit_path: dir.path().join("audit.log"),
             threshold: 0.55,
             cooldown_after_failures: 10,
             cooldown_duration: Duration::from_secs(60),
@@ -693,6 +828,46 @@ mod tests {
 
         assert!(result.matched);
         assert_eq!(result.template_id, Some(0));
+    }
+
+    #[test]
+    fn match_writes_audit_event() {
+        let (_dir, state) = test_state();
+        let peer = Some(PeerCredentials { uid: 0 });
+        let embedding = unit_vec(&[1.0, 0.0]);
+
+        state.dispatch(
+            RequestEnvelope::new(Request::Enroll {
+                username: "alice".to_owned(),
+                label: "front".to_owned(),
+                scope: IpcTemplateScope::Session,
+                embedding: embedding.clone(),
+            }),
+            peer,
+        );
+        state.dispatch(
+            RequestEnvelope::new(Request::Match {
+                username: "alice".to_owned(),
+                auth_scope: IpcAuthScope::Session,
+                probe_embedding: embedding,
+            }),
+            peer,
+        );
+
+        let audit = state.dispatch(
+            RequestEnvelope::new(Request::AuditRecent {
+                username: Some("alice".to_owned()),
+                limit: 5,
+            }),
+            peer,
+        );
+        let Response::Audit { events } = audit.response else {
+            panic!("expected audit response");
+        };
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].username, "alice");
+        assert_eq!(events[0].outcome, AuditOutcome::Success);
+        assert_eq!(events[0].reason, AuditReason::Matched);
     }
 
     #[test]

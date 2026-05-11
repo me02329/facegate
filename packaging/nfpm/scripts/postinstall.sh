@@ -55,6 +55,9 @@ chown -R root:root /etc/facegate /usr/share/facegate
 chown root:root /var/lib/facegate
 chmod 755 /var/lib/facegate
 migrate_template_storage
+touch /var/lib/facegate/audit.log 2>/dev/null || true
+chown facegate:facegate /var/lib/facegate/audit.log 2>/dev/null || true
+chmod 600 /var/lib/facegate/audit.log 2>/dev/null || true
 chmod 644 /etc/facegate/config.toml 2>/dev/null || true
 
 # ── Shell completions ─────────────────────────────────────────────────────────
