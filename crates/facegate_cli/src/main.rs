@@ -23,6 +23,8 @@ struct Cli {
 enum Command {
     /// Interactive TUI configuration editor
     Configure,
+    /// Print a compact installation and enrollment summary
+    Status,
     /// Run diagnostics on the installation
     Doctor,
     /// Test camera capture and face detection
@@ -117,6 +119,7 @@ fn main() {
     let cli = Cli::parse();
     let auth_mode = matches!(&cli.command, Some(Command::Auth { .. }));
     let watch_mode = matches!(&cli.command, Some(Command::Watch));
+    let status_mode = matches!(&cli.command, Some(Command::Status));
     // `cameras` only opens /dev/video* in read-only-ish ways; it should be
     // runnable as a normal user so people can discover their IR camera before
     // running anything privileged.
@@ -132,10 +135,10 @@ fn main() {
         return;
     }
 
-    // Auth, watch, and the read-only `cameras` listing run as an unprivileged
-    // user. Every other command touches sensitive face data or system config,
-    // so we require root.
-    if !auth_mode && !watch_mode && !cameras_mode {
+    // Auth, watch, status, and the read-only `cameras` listing run as an
+    // unprivileged user. Every other command touches sensitive face data or
+    // system config, so we require root.
+    if !auth_mode && !watch_mode && !status_mode && !cameras_mode {
         // SAFETY: geteuid() is always safe to call.
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("Error: facegate must be run as root (e.g. sudo facegate).");
@@ -204,7 +207,9 @@ enum ConfigPolicy {
 fn config_policy(command: &Option<Command>) -> ConfigPolicy {
     match command {
         Some(Command::Auth { .. }) => ConfigPolicy::StrictSilent,
-        Some(Command::Configure) | Some(Command::Doctor) | None => ConfigPolicy::DefaultOnError,
+        Some(Command::Configure) | Some(Command::Doctor) | Some(Command::Status) | None => {
+            ConfigPolicy::DefaultOnError
+        }
         // `cameras` does not need a config at all (it walks /dev/video*),
         // so don't fail if /etc/facegate/config.toml is missing.
         Some(Command::Watch) | Some(Command::Cameras) => ConfigPolicy::DefaultOnError,
@@ -242,6 +247,7 @@ fn run_command(
 ) -> anyhow::Result<()> {
     match cmd {
         Command::Configure => commands::configure::run(config, config_path),
+        Command::Status => commands::status::run(&config, &config_path),
         Command::Doctor => commands::doctor::run(&config),
         Command::CameraTest { device } => commands::camera_test::run(&config, device.as_deref()),
         Command::Cameras => commands::cameras::run(),
