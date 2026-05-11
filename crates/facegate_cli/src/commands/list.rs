@@ -1,11 +1,18 @@
 use std::sync::mpsc::Sender;
 
 use facegate_core::config::Config;
-use facegate_core::storage::{EnrolledTemplate, TemplateStore};
+use facegate_core::storage::EnrolledTemplate;
+
+use crate::commands::broker;
 
 pub fn load_templates(config: &Config, username: &str) -> anyhow::Result<Vec<EnrolledTemplate>> {
-    let store = TemplateStore::new(&config.storage.base_dir);
-    Ok(store.load(username)?.templates)
+    let _ = config;
+    broker::list_templates(username).map(|templates| {
+        templates
+            .into_iter()
+            .map(broker::summary_to_enrolled)
+            .collect()
+    })
 }
 
 pub fn run(config: &Config, username: &str) -> anyhow::Result<()> {
@@ -36,10 +43,10 @@ pub fn run_streaming(
         }};
     }
 
-    let store = TemplateStore::new(&config.storage.base_dir);
-    let templates = store.load(username)?;
+    let _ = config;
+    let templates = broker::list_templates(username)?;
 
-    if templates.templates.is_empty() {
+    if templates.is_empty() {
         out!("No enrolled templates for '{username}'.");
         return Ok(());
     }
@@ -47,12 +54,12 @@ pub fn run_streaming(
     out!("Templates for '{username}':\n");
     out!("  {:<4}  {:<20}  {:<8}  Label", "ID", "Created", "Scope");
     out!("  {}", "─".repeat(57));
-    for t in &templates.templates {
+    for t in &templates {
         out!(
             "  {:<4}  {:<20}  {:<8}  {}",
             t.id,
             t.created_at,
-            t.scope.label(),
+            broker::summary_scope_label(t),
             t.label
         );
     }

@@ -1,5 +1,6 @@
 pub mod add;
 pub mod auth;
+pub mod broker;
 pub mod camera_test;
 pub mod cameras;
 pub mod configure;

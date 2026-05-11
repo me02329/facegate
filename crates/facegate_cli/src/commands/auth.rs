@@ -1,28 +1,15 @@
 use facegate_core::config::Config;
 use facegate_core::error::{AuthExitCode, FaceRsError};
-use facegate_core::matching::is_match;
 use facegate_core::pipeline::FacePipeline;
-use facegate_core::storage::{AuthScope, TemplateStore};
+use facegate_core::storage::AuthScope;
+
+use crate::commands::broker;
 
 /// Non-interactive authentication called by the PAM module.
 /// Returns an exit code — caller must pass it to std::process::exit.
 pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCode {
     tracing::info!("auth requested for '{username}'");
     let auth_scope = auth_scope_for_service(service);
-
-    // Load enrolled templates first — cheap check before opening camera.
-    let store = TemplateStore::new(&config.storage.base_dir);
-    let enrolled = match store.embeddings_for_scope(username, auth_scope) {
-        Ok(e) => e,
-        Err(FaceRsError::NotEnrolled) => {
-            tracing::warn!("'{username}' has no enrolled templates");
-            return fallback_or_deny(config);
-        }
-        Err(e) => {
-            tracing::error!("storage error: {e}");
-            return AuthExitCode::InternalError;
-        }
-    };
 
     // Open camera + load models.
     let mut pipeline = match FacePipeline::new(config) {
@@ -44,7 +31,6 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
         }
     };
 
-    let threshold = config.recognition.threshold;
     let mut matches = 0_u32;
     for attempt in 1..=config.recognition.max_attempts {
         let embedding = match pipeline.capture_embedding(config) {
@@ -67,21 +53,35 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
             }
         };
 
-        if is_match(&embedding, &enrolled, threshold) {
-            matches += 1;
-            tracing::debug!(
-                attempt,
-                matches,
-                required = config.recognition.required_matches,
-                "face match accepted for attempt"
-            );
-            if matches >= config.recognition.required_matches {
-                tracing::info!("auth succeeded for '{username}'");
-                eprintln!("[ facegate ] \u{2714} Face recognized: {username}");
-                return AuthExitCode::Recognized;
+        match broker::match_embedding(username, auth_scope, embedding) {
+            Ok(result) if result.matched => {
+                matches += 1;
+                tracing::debug!(
+                    attempt,
+                    matches,
+                    required = config.recognition.required_matches,
+                    score = result.score,
+                    "face match accepted for attempt"
+                );
+                if matches >= config.recognition.required_matches {
+                    tracing::info!("auth succeeded for '{username}'");
+                    eprintln!("[ facegate ] \u{2714} Face recognized: {username}");
+                    return AuthExitCode::Recognized;
+                }
             }
-        } else if config.logging.log_failed_attempts {
-            tracing::warn!(attempt, "auth failed for '{username}': face not recognised");
+            Ok(result) => {
+                if config.logging.log_failed_attempts {
+                    tracing::warn!(
+                        attempt,
+                        score = result.score,
+                        "auth failed for '{username}': face not recognised"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!("broker match error: {e}");
+                return AuthExitCode::InternalError;
+            }
         }
     }
 

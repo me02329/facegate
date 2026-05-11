@@ -701,6 +701,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "facegate_core",
+ "facegate_ipc",
  "futures-util",
  "libc",
  "ratatui",

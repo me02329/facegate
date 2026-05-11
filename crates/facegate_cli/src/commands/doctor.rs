@@ -163,7 +163,7 @@ pub fn run_streaming(
         tx,
         "storage permissions are safe",
         safe_dir_permissions(&config.storage.base_dir),
-        Some("run: sudo chmod 755 /var/lib/facegate /var/lib/facegate/users"),
+        Some("run: sudo chown -R facegate:facegate /var/lib/facegate/users && sudo chmod 700 /var/lib/facegate/users"),
     );
     all_ok &= chk(
         tx,

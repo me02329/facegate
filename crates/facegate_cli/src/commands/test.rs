@@ -1,9 +1,10 @@
 use std::sync::mpsc::Sender;
 
 use facegate_core::config::Config;
-use facegate_core::matching::best_similarity;
 use facegate_core::pipeline::FacePipeline;
-use facegate_core::storage::{AuthScope, TemplateStore};
+use facegate_core::storage::AuthScope;
+
+use crate::commands::broker;
 
 #[derive(Debug, Clone, Copy)]
 pub enum TestScope {
@@ -42,10 +43,13 @@ pub fn run_streaming(
         }};
     }
 
-    let store = TemplateStore::new(&config.storage.base_dir);
-    let enrolled = match scope {
-        TestScope::All => store.embeddings_for(username)?,
-        TestScope::Auth(s) => store.embeddings_for_scope(username, s)?,
+    let templates = broker::list_templates(username)?;
+    let enrolled_count = match scope {
+        TestScope::All => templates.len(),
+        TestScope::Auth(s) => templates
+            .iter()
+            .filter(|template| broker::summary_allows(template, s))
+            .count(),
     };
     let scope_label = match scope {
         TestScope::All => "any",
@@ -54,8 +58,11 @@ pub fn run_streaming(
     };
     out!(
         "Found {} enrolled template(s) for '{username}' (scope: {scope_label}).",
-        enrolled.len()
+        enrolled_count
     );
+    if enrolled_count == 0 {
+        return Ok(());
+    }
 
     out!("Opening camera and loading models...");
     let mut pipeline = FacePipeline::new(config)?;
@@ -67,20 +74,60 @@ pub fn run_streaming(
     let embedding = pipeline.capture_embedding(config)?;
     out!("Face detected.\n");
 
+    let result = match scope {
+        TestScope::Auth(s) => broker::match_embedding(username, s, embedding)?,
+        TestScope::All => {
+            let mut results = Vec::new();
+            if templates
+                .iter()
+                .any(|template| broker::summary_allows(template, AuthScope::Session))
+            {
+                if let Some(result) = broker::match_embedding_optional(
+                    username,
+                    AuthScope::Session,
+                    embedding.clone(),
+                )? {
+                    results.push(result);
+                }
+            }
+            if templates
+                .iter()
+                .any(|template| broker::summary_allows(template, AuthScope::Sudo))
+            {
+                if let Some(result) =
+                    broker::match_embedding_optional(username, AuthScope::Sudo, embedding)?
+                {
+                    results.push(result);
+                }
+            }
+            results
+                .into_iter()
+                .reduce(best_result)
+                .ok_or_else(|| anyhow::anyhow!("No enrolled templates to compare against."))?
+        }
+    };
+
     let threshold = config.recognition.threshold;
-    match best_similarity(&embedding, &enrolled) {
+    match result.score {
         None => out!("No enrolled templates to compare against."),
         Some(score) => {
-            let result = if score >= threshold {
-                "ACCEPT"
-            } else {
-                "REJECT"
-            };
-            let result_color = if score >= threshold { "✓" } else { "✗" };
+            let label = if result.matched { "ACCEPT" } else { "REJECT" };
+            let marker = if result.matched { "✓" } else { "✗" };
             out!("Best similarity : {score:.4}");
             out!("Threshold       : {threshold}");
-            out!("Result          : [{result_color}] {result}");
+            out!("Result          : [{marker}] {label}");
         }
     }
     Ok(())
+}
+
+fn best_result(
+    left: facegate_ipc::MatchResult,
+    right: facegate_ipc::MatchResult,
+) -> facegate_ipc::MatchResult {
+    match (left.score, right.score) {
+        (Some(a), Some(b)) if b > a => right,
+        (None, Some(_)) => right,
+        _ => left,
+    }
 }

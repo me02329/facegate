@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 facegate_core = { path = "../facegate_core" }
+facegate_ipc = { path = "../facegate_ipc" }
 anyhow = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }

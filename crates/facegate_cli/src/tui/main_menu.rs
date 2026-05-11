@@ -18,7 +18,6 @@ use ratatui::{
 use std::{io, time::Duration};
 
 use facegate_core::config::Config;
-use facegate_core::storage::TemplateStore;
 
 use crate::commands;
 
@@ -564,7 +563,6 @@ impl<'a> App<'a> {
 
         let (tx, rx) = mpsc::channel::<String>();
         let username = std::mem::take(&mut self.template_username);
-        let store = TemplateStore::new(&self.config.storage.base_dir);
 
         thread::spawn(move || {
             let _ = tx.send(format!(
@@ -573,7 +571,7 @@ impl<'a> App<'a> {
             ));
             let _ = tx.send(String::new());
             for id in ids {
-                match store.remove_template(&username, id) {
+                match commands::broker::remove_template(&username, id) {
                     Ok(_) => {
                         let _ = tx.send(format!("  Removed template {id}"));
                     }

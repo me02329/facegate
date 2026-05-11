@@ -26,8 +26,13 @@ if ! id -u facegate >/dev/null 2>&1; then
 fi
 
 mkdir -p /etc/facegate "$MODELS_DIR" /var/lib/facegate/users
-chown -R root:root /etc/facegate /usr/share/facegate /var/lib/facegate
-chmod 755 /var/lib/facegate /var/lib/facegate/users
+chown -R root:root /etc/facegate /usr/share/facegate
+chown root:root /var/lib/facegate
+chown -R facegate:facegate /var/lib/facegate/users
+chmod 755 /var/lib/facegate
+chmod 700 /var/lib/facegate/users
+find -P /var/lib/facegate/users -type d -exec chmod 700 {} +
+find -P /var/lib/facegate/users -name embeddings.json -type f -exec chmod 600 {} +
 chmod 644 /etc/facegate/config.toml 2>/dev/null || true
 
 # ── Shell completions ─────────────────────────────────────────────────────────
@@ -42,6 +47,7 @@ facegate completions fish > /usr/share/fish/vendor_completions.d/facegate.fish 2
 # Reload the system daemon so the new units are visible. User instances pick up
 # the watch unit automatically at next login.
 systemctl daemon-reload 2>/dev/null || true
+systemctl enable --now facegate-brokerd.service 2>/dev/null || true
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

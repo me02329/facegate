@@ -1,4 +1,6 @@
 use std::ffi::CString;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -54,6 +56,8 @@ async fn run(socket_path: PathBuf, state: BrokerState) -> Result<()> {
     prepare_socket_path(&socket_path)?;
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("cannot bind {}", socket_path.display()))?;
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666))
+        .with_context(|| format!("cannot set permissions on {}", socket_path.display()))?;
 
     tracing::info!(socket = %socket_path.display(), "facegate broker listening");
 

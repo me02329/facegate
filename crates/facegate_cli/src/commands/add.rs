@@ -4,7 +4,9 @@ use std::sync::mpsc::Sender;
 use anyhow::bail;
 use facegate_core::config::Config;
 use facegate_core::pipeline::FacePipeline;
-use facegate_core::storage::{TemplateScope, TemplateStore};
+use facegate_core::storage::TemplateScope;
+
+use crate::commands::broker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnrollmentTarget {
@@ -96,7 +98,6 @@ pub fn run_streaming(
         "Enrolling {} face for '{username}' (label: '{label}', {samples} sample(s))",
         target.label()
     );
-    let store = TemplateStore::new(&config.storage.base_dir);
 
     // Open camera + load models *once* and reuse for every sample. Reopening
     // the V4L2 device + reloading the ONNX models for each sample (~1 s each
@@ -130,34 +131,11 @@ pub fn run_streaming(
             format!("{label}-{i}")
         };
         let template =
-            store.add_template(username, &sample_label, target.template_scope(), embedding)?;
+            broker::enroll_template(username, &sample_label, target.template_scope(), embedding)?;
         out!(
             "  ✓ template #{} saved (label: '{sample_label}')",
             template.id
         );
-    }
-
-    // The facegate-watch daemon runs as the user (not root). Chown the template
-    // directory and file so the daemon can read them. We chown when the *new*
-    // enrollment touches the session scope, AND when any *existing* template
-    // for that user has session scope — otherwise re-enrolling with --for sudo
-    // after a previous --for both would re-create embeddings.json owned by
-    // root, breaking the watch daemon.
-    let needs_chown = matches!(target, EnrollmentTarget::Session | EnrollmentTarget::Both)
-        || store
-            .load(username)
-            .map(|t| {
-                t.templates.iter().any(|tpl| {
-                    matches!(
-                        tpl.scope,
-                        facegate_core::storage::TemplateScope::Session
-                            | facegate_core::storage::TemplateScope::Both
-                    )
-                })
-            })
-            .unwrap_or(false);
-    if needs_chown {
-        chown_user_data_dir(username, &config.storage.base_dir)?;
     }
 
     out!("");
@@ -184,36 +162,6 @@ fn ask_sample_count() -> anyhow::Result<u32> {
         Ok(n) if (1..=10).contains(&n) => Ok(n),
         _ => bail!("invalid number of samples '{trimmed}': expected 1-10"),
     }
-}
-
-/// Transfers ownership of the user's template directory and `embeddings.json`
-/// to the enrolled user so that `facegate-watch` (which runs as the user, not
-/// root) can read the templates.  Permissions stay at 0700/0600 — only the
-/// owner changes, so no other user gains access.
-fn chown_user_data_dir(username: &str, base_dir: &std::path::Path) -> anyhow::Result<()> {
-    let uid = lookup_uid(username)?
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve UID for '{username}'"))?;
-    // -1 (all bits set) means "leave gid unchanged" in POSIX chown.
-    let keep_gid = u32::MAX;
-
-    let user_dir = base_dir.join(username);
-    for path in [user_dir.clone(), user_dir.join("embeddings.json")] {
-        if !path.exists() {
-            continue;
-        }
-        let c_path = std::ffi::CString::new(path.to_str().unwrap_or(""))
-            .map_err(|_| anyhow::anyhow!("non-UTF-8 path: {}", path.display()))?;
-        // SAFETY: chown with a valid CString path and numeric uid/gid is safe.
-        let ret = unsafe { libc::chown(c_path.as_ptr(), uid, keep_gid) };
-        if ret != 0 {
-            bail!(
-                "chown {username} {}: {}",
-                path.display(),
-                std::io::Error::last_os_error()
-            );
-        }
-    }
-    Ok(())
 }
 
 fn require_root() -> anyhow::Result<()> {

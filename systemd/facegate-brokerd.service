@@ -8,7 +8,7 @@ ExecStart=/usr/bin/facegate-brokerd
 User=facegate
 Group=facegate
 RuntimeDirectory=facegate
-RuntimeDirectoryMode=0750
+RuntimeDirectoryMode=0755
 UMask=0077
 Restart=on-failure
 RestartSec=2
@@ -29,7 +29,7 @@ ProtectClock=yes
 ProtectHostname=yes
 ProtectProc=invisible
 ProcSubset=pid
-ReadWritePaths=/run/facegate
+ReadWritePaths=/run/facegate /var/lib/facegate
 RestrictAddressFamilies=AF_UNIX
 RestrictNamespaces=yes
 RestrictRealtime=yes
@@ -47,4 +47,3 @@ LimitCORE=0
 
 [Install]
 WantedBy=multi-user.target
-
