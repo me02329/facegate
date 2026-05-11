@@ -5,8 +5,13 @@
 //! broker-owned and are represented outside the broker as metadata only.
 
 use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::path::Path;
 
+pub const DEFAULT_SOCKET_PATH: &str = "/run/facegate/broker.sock";
 pub const PROTOCOL_VERSION: u16 = 1;
+pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 pub type Embedding = Vec<f32>;
 
@@ -172,6 +177,55 @@ pub fn encode_response(response: &ResponseEnvelope) -> serde_json::Result<Vec<u8
     Ok(out)
 }
 
+pub fn encode_request(request: &RequestEnvelope) -> serde_json::Result<Vec<u8>> {
+    let mut out = serde_json::to_vec(request)?;
+    out.push(b'\n');
+    Ok(out)
+}
+
+pub fn send_request(
+    socket_path: impl AsRef<Path>,
+    request: RequestEnvelope,
+) -> Result<ResponseEnvelope, ClientError> {
+    let mut stream = UnixStream::connect(socket_path.as_ref())?;
+    let encoded = encode_request(&request)?;
+    stream.write_all(&encoded)?;
+    stream.flush()?;
+
+    let mut reader = BufReader::new(stream);
+    let mut response = Vec::new();
+    let bytes = reader.read_until(b'\n', &mut response)?;
+    if bytes == 0 {
+        return Err(ClientError::EmptyResponse);
+    }
+    if response.len() > MAX_RESPONSE_BYTES {
+        return Err(ClientError::ResponseTooLarge);
+    }
+
+    let envelope = serde_json::from_slice::<ResponseEnvelope>(&response)?;
+    if envelope.version != PROTOCOL_VERSION {
+        return Err(ClientError::VersionMismatch {
+            actual: envelope.version,
+            expected: PROTOCOL_VERSION,
+        });
+    }
+    Ok(envelope)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ClientError {
+    #[error("broker I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("broker JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("broker returned an empty response")]
+    EmptyResponse,
+    #[error("broker response is too large")]
+    ResponseTooLarge,
+    #[error("broker protocol version mismatch: got {actual}, expected {expected}")]
+    VersionMismatch { actual: u16, expected: u16 },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +242,14 @@ mod tests {
         let decoded: RequestEnvelope = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn request_encoding_is_newline_delimited() {
+        let req = RequestEnvelope::new(Request::Health);
+        let encoded = encode_request(&req).expect("encode");
+
+        assert_eq!(encoded.last(), Some(&b'\n'));
     }
 
     #[test]
