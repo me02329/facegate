@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 ORT_VERSION="1.24.2"
 MODELS_DIR="/usr/share/facegate/models"
 DETECTOR="$MODELS_DIR/scrfd_500m.onnx"
@@ -12,22 +11,20 @@ EMBEDDER_SHA256="4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e4
 if ! getent group facegate >/dev/null; then
     groupadd --system facegate
 fi
-
-if [ -x /usr/sbin/nologin ]; then
+if [ -x /usr/bin/nologin ]; then
+    facegate_nologin=/usr/bin/nologin
+elif [ -x /usr/sbin/nologin ]; then
     facegate_nologin=/usr/sbin/nologin
 elif [ -x /sbin/nologin ]; then
     facegate_nologin=/sbin/nologin
 else
     facegate_nologin=/bin/false
 fi
-
 if ! id -u facegate >/dev/null 2>&1; then
     useradd --system --no-create-home --gid facegate --shell "$facegate_nologin" facegate
 fi
-
 migrate_template_storage() {
     local users_dir="/var/lib/facegate/users"
-
     if [ -L "$users_dir" ]; then
         echo "Warning: $users_dir is a symlink; leaving template storage untouched." >&2
         return 0
@@ -36,20 +33,16 @@ migrate_template_storage() {
         install -d -m 0700 -o facegate -g facegate "$users_dir"
         return 0
     fi
-
     while IFS= read -r path; do
         echo "Warning: suspicious template path left untouched: $path" >&2
     done < <(find -P "$users_dir" \( -type l -o -type p -o -type s -o -type b -o -type c \) -print 2>/dev/null)
-
     chown facegate:facegate "$users_dir"
     chmod 700 "$users_dir"
-
     find -P "$users_dir" -type d -exec chown facegate:facegate {} +
     find -P "$users_dir" -type d -exec chmod 700 {} +
     find -P "$users_dir" -type f -name embeddings.json -exec chown facegate:facegate {} +
     find -P "$users_dir" -type f -name embeddings.json -exec chmod 600 {} +
 }
-
 mkdir -p /etc/facegate "$MODELS_DIR" /var/lib/facegate/users
 chown -R root:root /etc/facegate /usr/share/facegate
 chown root:root /var/lib/facegate
@@ -61,24 +54,22 @@ chmod 600 /var/lib/facegate/audit.log 2>/dev/null || true
 chmod 644 /etc/facegate/config.toml 2>/dev/null || true
 
 # ── Shell completions ─────────────────────────────────────────────────────────
+
 mkdir -p /usr/share/zsh/site-functions
-facegate completions zsh  > /usr/share/zsh/site-functions/_facegate        2>/dev/null || true
+facegate completions zsh > /usr/share/zsh/site-functions/_facegate 2>/dev/null || true
 mkdir -p /usr/share/bash-completion/completions
 facegate completions bash > /usr/share/bash-completion/completions/facegate 2>/dev/null || true
 mkdir -p /usr/share/fish/vendor_completions.d
 facegate completions fish > /usr/share/fish/vendor_completions.d/facegate.fish 2>/dev/null || true
 
 # ── systemd services ──────────────────────────────────────────────────────────
-# Reload the system daemon so the new units are visible. User instances pick up
-# the watch unit automatically at next login.
+
 systemctl daemon-reload 2>/dev/null || true
 systemctl enable --now facegate-brokerd.service 2>/dev/null || true
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-# Returns 0 if both stdin and stdout are connected to a terminal.
 is_interactive() { [ -t 0 ] && [ -t 1 ]; }
-
 ask_yn() {
     local prompt="$1"
     local yn
@@ -89,7 +80,6 @@ ask_yn() {
         *) return 1 ;;
     esac
 }
-
 http_get() {
     local url="$1" dest="$2"
     if command -v curl &>/dev/null; then
@@ -101,7 +91,6 @@ http_get() {
         return 1
     fi
 }
-
 verify_sha256() {
     local file="$1" expected="$2"
     if ! command -v sha256sum &>/dev/null; then
@@ -117,13 +106,10 @@ verify_sha256() {
         return 1
     fi
 }
-
 ort_present() {
     ldconfig -p 2>/dev/null | grep -q libonnxruntime && return 0
-    find /usr/lib /usr/local/lib -maxdepth 1 -name 'libonnxruntime.so*' \
-        -print -quit 2>/dev/null | grep -q .
+    find /usr/lib /usr/local/lib -maxdepth 1 -name 'libonnxruntime.so*' -print -quit 2>/dev/null | grep -q .
 }
-
 models_present() { [ -f "$DETECTOR" ] && [ -f "$EMBEDDER" ]; }
 
 # ── Install ONNX Runtime ──────────────────────────────────────────────────────
@@ -131,30 +117,25 @@ models_present() { [ -f "$DETECTOR" ] && [ -f "$EMBEDDER" ]; }
 install_ort() {
     local arch
     case "$(uname -m)" in
-        x86_64)  arch="x64" ;;
+        x86_64) arch="x64" ;;
         aarch64) arch="aarch64" ;;
         *)
             echo "Warning: unsupported architecture $(uname -m) — install ONNX Runtime manually." >&2
             return 1
             ;;
     esac
-
     local name="onnxruntime-linux-${arch}-${ORT_VERSION}"
     local url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${name}.tgz"
     local tmp
     tmp="$(mktemp -d /tmp/facegate-ort-XXXXXX)"
-
     echo "Downloading ONNX Runtime ${ORT_VERSION} (~10 MB)…"
     http_get "$url" "$tmp/ort.tgz"
     echo "Extracting…"
     tar -xzf "$tmp/ort.tgz" -C "$tmp"
-
-    install -Dm755 "$tmp/$name/lib/libonnxruntime.so.${ORT_VERSION}" \
-        "/usr/lib/libonnxruntime.so.${ORT_VERSION}"
-    install -Dm755 "$tmp/$name/lib/libonnxruntime_providers_shared.so" \
-        /usr/lib/libonnxruntime_providers_shared.so
+    install -Dm755 "$tmp/$name/lib/libonnxruntime.so.${ORT_VERSION}" "/usr/lib/libonnxruntime.so.${ORT_VERSION}"
+    install -Dm755 "$tmp/$name/lib/libonnxruntime_providers_shared.so" /usr/lib/libonnxruntime_providers_shared.so
     ln -sf "libonnxruntime.so.${ORT_VERSION}" /usr/lib/libonnxruntime.so.1
-    ln -sf "libonnxruntime.so.1"              /usr/lib/libonnxruntime.so
+    ln -sf "libonnxruntime.so.1" /usr/lib/libonnxruntime.so
     ldconfig
     rm -rf "$tmp"
     echo "✓ ONNX Runtime ${ORT_VERSION} installed."
@@ -166,21 +147,17 @@ install_models() {
     local url="https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
     local tmp_zip
     tmp_zip="$(mktemp /tmp/facegate-models-XXXXXX.zip)"
-
     echo "Downloading face recognition models (~400 MB)…"
     http_get "$url" "$tmp_zip"
     echo "Extracting…"
-    unzip -jo "$tmp_zip" "*.onnx"   -d "$MODELS_DIR" 2>/dev/null || \
-    unzip -jo "$tmp_zip" "*/*.onnx" -d "$MODELS_DIR" 2>/dev/null || true
+    unzip -jo "$tmp_zip" "*.onnx" -d "$MODELS_DIR" 2>/dev/null || unzip -jo "$tmp_zip" "*/*.onnx" -d "$MODELS_DIR" 2>/dev/null || true
     rm -f "$tmp_zip"
-
     for src in det_10g det_500m; do
         [ -f "$MODELS_DIR/${src}.onnx" ] && mv "$MODELS_DIR/${src}.onnx" "$DETECTOR" && break
     done
     for src in w600k_r50 w600k_mbf; do
         [ -f "$MODELS_DIR/${src}.onnx" ] && mv "$MODELS_DIR/${src}.onnx" "$EMBEDDER" && break
     done
-
     if models_present; then
         verify_sha256 "$DETECTOR" "$DETECTOR_SHA256"
         verify_sha256 "$EMBEDDER" "$EMBEDDER_SHA256"
@@ -192,6 +169,7 @@ install_models() {
 }
 
 # ── ONNX Runtime prompt ───────────────────────────────────────────────────────
+
 echo ""
 if ort_present; then
     echo "✓ ONNX Runtime already installed."
@@ -210,6 +188,7 @@ MSG
 fi
 
 # ── Models — always download (required, no distro package available) ──────────
+
 echo ""
 if models_present; then
     echo "✓ Face recognition models already installed."
@@ -226,6 +205,7 @@ else
 fi
 
 # ── Next steps ────────────────────────────────────────────────────────────────
+
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " Facegate installed. Next steps:"
