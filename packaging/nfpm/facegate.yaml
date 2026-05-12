@@ -7,7 +7,7 @@ priority: optional
 maintainer: Facegate maintainers
 description: Native facial authentication for Linux using PAM and ONNX Runtime.
 homepage: https://github.com/me02329/facegate
-license: MIT
+license: GPL-3.0-or-later
 
 contents:
   - src: target/release/facegate
