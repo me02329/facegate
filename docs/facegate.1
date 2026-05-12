@@ -1,4 +1,4 @@
-.TH FACEGATE 1 "May 2026" "Facegate 0.1.0" "User Commands"
+.TH FACEGATE 1 "May 2026" "Facegate 0.2.0" "User Commands"
 .SH NAME
 facegate \- native facial authentication for Linux, including automatic screen unlock
 .SH SYNOPSIS
@@ -22,6 +22,9 @@ facegate \- native facial authentication for Linux, including automatic screen u
 .SY facegate
 .B doctor
 .RI [ --config " PATH" ]
+.YS
+.SY facegate
+.B cameras
 .YS
 .SY facegate
 .B camera-test
@@ -71,10 +74,14 @@ facegate \- native facial authentication for Linux, including automatic screen u
 .B facegate
 is the command line and interactive terminal interface for Facegate, a native
 Linux facial authentication stack backed by V4L2 cameras, ONNX Runtime face
-detection, ArcFace-compatible embeddings, a PAM module, and a D-Bus screen-lock
-daemon.
+detection, ArcFace-compatible embeddings, a PAM module, a D-Bus screen-lock
+daemon, and \(em since v0.2.0 \(em a dedicated system broker daemon
+.RB ( facegate-brokerd )
+that owns all biometric templates and runs the match decision out-of-process
+from user sessions.
 .PP
-Facegate provides two complementary authentication paths:
+Facegate provides two complementary authentication paths, both of which now
+delegate matching to the broker:
 .TP
 .B PAM module
 .IR pam_facegate.so
@@ -82,8 +89,13 @@ integrates with any PAM-aware service: sudo, su, login managers (SDDM, LightDM,
 GDM, greetd), and screen lockers that call PAM on form submission. The module
 spawns
 .B facegate auth
-as a subprocess and succeeds immediately if the face matches, then falls through
-to password authentication if it does not.
+as a subprocess. That subprocess captures a single camera frame, submits it
+to
+.B facegate-brokerd
+over
+.IR /run/facegate/broker.sock ,
+and exits with the broker's decision. PAM succeeds immediately if the face
+matches, then falls through to password authentication if it does not.
 .TP
 .B Watch daemon
 .B facegate-watch.service
@@ -91,14 +103,16 @@ is a systemd user service that subscribes to the
 .B Lock
 signal on
 .IR org.freedesktop.login1.Session .
-The moment the screen locks, it opens the camera and begins recognising. On a
-successful match it calls the
+The moment the screen locks, it opens the camera, captures frames, and
+submits each one to
+.B facegate-brokerd
+for matching. On a successful match it calls the
 .B Unlock()
 D-Bus method on the session object directly \(em no keypress, no unlock form.
 If recognition fails or the user types their password first, the camera is
-released and the flow continues normally. This provides a Windows-Hello-style
-unlock experience, but it is not equivalent to Windows Hello's template
-isolation model.
+released and the flow continues normally. Since v0.2.0 the watch daemon
+itself no longer loads SCRFD or ArcFace models, no longer reads stored
+templates, and no longer decides the match outcome \(em the broker does.
 .PP
 Running
 .B facegate
@@ -314,10 +328,14 @@ signal), the daemon opens the camera using the session ACLs that
 automatically grants to the active session owner via udev rules. No extra
 group membership is required.
 .IP 4. 4
-It runs the face recognition pipeline (load templates \(-> capture frame \(->
-embed \(-> cosine match) in a background thread, up to
+It captures camera frames in a background thread, submits each one to
+.B facegate-brokerd
+through
+.IR /run/facegate/broker.sock ,
+and waits for the broker's match decision. The daemon itself does not load
+templates and does not run SCRFD or ArcFace. Up to
 .B max_attempts
-times.
+frames are submitted before the daemon gives up.
 .IP 5. 4
 On a successful match it calls
 .BR org.freedesktop.login1.Session.Unlock() .
@@ -350,9 +368,18 @@ lines:
 .PP
 .RS
 .EX
-auth      sufficient    pam_facegate.so
+auth      sufficient    /usr/lib/security/pam_facegate.so
 .EE
 .RE
+.PP
+The absolute path is intentional: it is the only spelling that works on every
+distribution Facegate targets, including Debian / Ubuntu (which search
+.IR /usr/lib/x86_64-linux-gnu/security )
+and Fedora
+.RI ( /usr/lib64/security ).
+The bare-name form
+.B pam_facegate.so
+only works on distros whose PAM search path matches our install dir.
 .PP
 .B Warning:
 always keep a root shell open while editing PAM configuration. A broken PAM
@@ -420,8 +447,27 @@ Template storage directory. Default:
 .I /usr/bin/facegate
 Facegate command line interface.
 .TP
+.I /usr/bin/facegate-brokerd
+System broker daemon. Owns all enrolled templates, runs face detection /
+embedding / matching, and exposes match decisions over a local Unix socket.
+Started as the
+.B facegate
+system user by
+.BR facegate-brokerd.service .
+.TP
 .I /usr/lib/security/pam_facegate.so
-PAM module. Loaded by PAM at authentication time.
+PAM module. Loaded by PAM at authentication time. Spawns
+.B facegate auth
+as a subprocess; does not link ONNX Runtime.
+.TP
+.I /usr/lib/systemd/system/facegate-brokerd.service
+systemd system unit that starts
+.BR facegate-brokerd .
+Includes a hardened sandbox profile
+.RB ( NoNewPrivileges ,
+.BR MemoryDenyWriteExecute ,
+.BR ProtectProc=invisible ,
+seccomp, AF_UNIX only, no capabilities, no network).
 .TP
 .I /usr/lib/systemd/user/facegate-watch.service
 systemd user service unit for the screen-lock watch daemon.
@@ -430,19 +476,39 @@ systemd user service unit for the screen-lock watch daemon.
 Default configuration file.
 .TP
 .I /usr/share/facegate/models/scrfd_500m.onnx
-Default face detector model (SCRFD 500M).
+Default face detector model (SCRFD 500M). Loaded by
+.BR facegate-brokerd .
 .TP
 .I /usr/share/facegate/models/arcface_w600k_r50.onnx
-Default face embedding model (ArcFace W600K R50).
+Default face embedding model (ArcFace W600K R50). Loaded by
+.BR facegate-brokerd .
+.TP
+.I /run/facegate/broker.sock
+Local Unix socket exposed by
+.BR facegate-brokerd .
+Mode
+.BR 0660 ,
+owned
+.BR facegate:facegate .
+Peer credentials are verified via
+.BR SO_PEERCRED .
+Created by systemd as
+.B RuntimeDirectory
+on every boot.
 .TP
 .I /var/lib/facegate/users/\fIUSERNAME\fP/embeddings.json
 Stored face templates for a user. Permissions: 0600, owned by
-.IR USERNAME .
+.BR facegate:facegate
+(not by
+.IR USERNAME ).
+Read and written only by the broker.
 .TP
 .I /var/lib/facegate/audit.log
-Local JSONL audit log written by the broker. Contains timestamp, username,
-auth scope, coarse outcome, and coarse reason. It does not contain images,
-embeddings, or similarity scores.
+Local JSONL audit log written by the broker. Permissions: 0600, owned by
+.BR facegate:facegate .
+Contains timestamp, username, auth scope, coarse outcome, and coarse reason.
+It does not contain images, embeddings, similarity scores, or any
+score-derived data.
 .SH EXAMPLES
 .TP
 Open the interactive menu:
@@ -518,6 +584,27 @@ All processing happens on the local machine. Face detection and embedding
 extraction run entirely within ONNX Runtime. No image, embedding, biometric
 hash, or identity data is ever sent over the network. There is no telemetry,
 no licensing server, and no cloud dependency.
+.SS Trust boundary: the broker
+Since v0.2.0 the authentication trust boundary lives inside
+.BR facegate-brokerd ,
+a dedicated system daemon running as the unprivileged
+.B facegate
+system user. Clients (the PAM helper, the watch daemon, the CLI) never read
+enrolled templates and never decide match outcomes; they only capture frames
+and submit them through
+.BR MatchFrame .
+The legacy
+.B Match
+endpoint (probe-embedding in, decision out) is restricted to
+.BR uid=0 ,
+which closes the synthetic-embedding bypass that was available to any
+same-UID process under v0.1.0. Probe embeddings and decoded frame bytes are
+zeroised after each match, and the broker rejects frames whose declared
+geometry exceeds 4096\(mu4096 or whose buffer length disagrees with
+.IR "width \(mu height \(mu bytes-per-pixel" .
+Peer credentials on the socket are verified via
+.BR SO_PEERCRED ;
+the broker applies per-UID and per-username rate limiting and lockouts.
 .SS Template storage
 ArcFace templates are 512-dimensional floating-point vectors derived from face
 images. They are not photographs, but they are sensitive biometric data.
@@ -529,23 +616,32 @@ Templates are stored in
 .IR /var/lib/facegate/users/USERNAME/embeddings.json
 with
 .B 0600
-permissions owned by
-.IR USERNAME .
-Root performs enrollment (writing templates) and immediately transfers ownership
-to the enrolled user for session-auth flows. All writes are atomic: Facegate
-writes to a temporary file, calls
+permissions owned by the
+.B facegate:facegate
+system user/group \(em
+.B not
+by the enrolled user. Only the broker reads or writes the file. A normal user
+process (including code running as the enrolled user) can only request a match
+decision via
+.BR MatchFrame ;
+it cannot read its own ArcFace vector. All writes are atomic: the broker writes
+to a temporary file, calls
 .BR fsync (2),
 and renames it over the destination so that no partial state can persist across
-a power failure. Symlink traversal is blocked on every file operation.
+a power failure. Symlink traversal is blocked on every file operation. Template
+sealing to platform state (TPM) is not yet implemented; tracked in
+.IR docs/security-issues/07-tpm-sealing.md .
 .SS PAM module design
 .IR pam_facegate.so
 is deliberately minimal. It does not link ONNX Runtime, does not load models,
-and does not open the camera. When called by PAM, it sends an informational
-message through the application's conversation function, then spawns
+does not open the camera, and does not speak the broker protocol. When called
+by PAM, it sends an informational message through the application's
+conversation function, then spawns
 .B /usr/bin/facegate auth --user NAME
-as a subprocess and reads its exit code. A hard timeout of 45 seconds ensures
-PAM is never blocked indefinitely. The subprocess approach keeps the security
-surface of the PAM module small and makes it independently auditable.
+as a subprocess and reads its exit code. A hard timeout of 25 seconds (reduced
+from 45 s in v0.1.0) ensures PAM is never blocked indefinitely. The subprocess
+approach keeps the security surface of the PAM module small and makes it
+independently auditable.
 .SS Watch daemon attack surface
 .B facegate-watch
 has no listening socket of any kind. It cannot be reached over the network,
@@ -594,28 +690,60 @@ the same one used by PipeWire and other session-aware daemons.
 .PP
 .B Same-UID attacker.
 If an attacker already has code execution as the same user, the session is
-fully compromised regardless of Facegate. They already have read access to the
-template file, camera access, and the ability to call
-.B Unlock()
-themselves. The daemon adds no new attack surface in this scenario.
+already compromised in many ways: they have camera access, D-Bus access, and
+filesystem access to everything the user owns. However, as of v0.2.0 they
+do
+.B not
+have read access to enrolled templates (which now live under
+.BR facegate:facegate )
+and they cannot fabricate a match by submitting a precomputed embedding (the
+.B Match
+endpoint is restricted to
+.BR uid=0 ;
+.B MatchFrame
+requires a real camera frame). The broker also enforces per-UID rate limits.
+The watch daemon adds no fundamental attack surface beyond what an attacker
+in the user session already has.
 .SS Comparison with Windows Hello
 Windows Hello uses
 .BR WinBioSvc ,
 a privileged biometric service running as
 .B SYSTEM
-with hardware-backed protections to keep biometric templates outside normal user
-processes.
+with hardware-backed protections to keep biometric templates outside normal
+user processes and to bind matching to live camera frames.
 .PP
-Current Facegate releases do not yet provide that level of isolation: session
-templates are readable by the enrolled user so the watch daemon can
-authenticate. The planned broker architecture moves templates to a dedicated
-.B facegate
-system user and exposes only match decisions over local IPC.
+As of v0.2.0, Facegate has reached the first of those two properties: a
+dedicated system daemon
+.RB ( facegate-brokerd )
+owns all templates, normal user processes cannot read enrolled vectors, and
+matching only happens broker-side after the broker has received a frame from
+the client.
 .PP
-If the first broker implementation accepts probe embeddings computed by the
-client, that still protects stored templates from passive exfiltration, but it
-does not prove the probe came from a live camera frame. Full Windows-Hello-style
-semantics require broker-side frame processing and liveness checks.
+What is
+.B not
+yet equivalent to Windows Hello:
+.IP \(bu 4
+.B Liveness / presentation attack detection.
+A high-quality photograph or replay can still match a single-camera capture.
+Tracked in
+.IR docs/security-issues/06-liveness-pad.md .
+.IP \(bu 4
+.B Dual-stream RGB+IR cross-check.
+Tracked in
+.IR docs/security-issues/09-dual-camera-cross-check.md ,
+planned for v0.3.0.
+.IP \(bu 4
+.B TPM sealing of templates at rest.
+Tracked in
+.IR docs/security-issues/07-tpm-sealing.md .
+.IP \(bu 4
+.B Broker-side frame acquisition.
+Windows Hello captures frames inside its privileged service; the Facegate
+broker runs
+.B PrivateDevices=yes
+and instead receives frames from clients. A same-UID attacker can therefore
+submit a frame, but the frame must still pass detection and matching
+server-side. Closing this gap requires the liveness PAD work above.
 .SS Recommendations
 .IP \(bu 4
 Keep
