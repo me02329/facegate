@@ -1,2 +1,28 @@
+# Rust build artefacts
 /target/
 **/*.rs.bk
+
+# Packaging output (scripts/package-nfpm.sh)
+/dist/
+*.deb
+*.rpm
+*.pkg.tar.zst
+
+# Ad-hoc backups left by session-auth / manual PAM edits
+*.bak
+*.orig
+*~
+
+# Local logs / temporary working files
+*.log
+/tmp/
+/.tmp/
+facegate-*.tmp
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
