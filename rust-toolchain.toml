@@ -1,0 +1,10 @@
+# Pin the Rust toolchain so local and CI builds stay in lockstep.
+#
+# When bumping this, run `cargo fmt`, `cargo clippy --workspace --all-targets
+# -- -D warnings`, and `cargo test --workspace` locally first — newer
+# toolchains can introduce new clippy lints that break CI.
+
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
