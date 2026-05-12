@@ -7,6 +7,76 @@ on a best-effort basis while the IPC protocol stabilises.
 
 ## [Unreleased]
 
+In-progress work targeting **v0.3.0**. Focus so far: packaging
+reliability, install-time correctness, contributor ergonomics, and a
+documented security disclosure channel. The bigger features tracked
+for this release (dual-camera RGB+IR cross-check, broker subcommands,
+emergency PAM rollback, liveness PAD groundwork) are still open.
+
+### Added
+
+- `SECURITY.md` with a supported-versions table, a private disclosure
+  channel (GitHub private vulnerability reporting + email fallback),
+  acknowledgement / triage / disclosure windows (7 / 14 / 90 days),
+  an in-scope vs out-of-scope list, a live-compromise runbook, and a
+  threat-model summary cross-referencing the roadmap (#32).
+- `rust-toolchain.toml` pinning the workspace at `1.95.0` with
+  `rustfmt` and `clippy`; the CI workflow installs the same version
+  explicitly so contributors and CI no longer drift (#43).
+- `.editorconfig` covering Rust, TOML/YAML/JSON, Markdown, shell, and
+  Makefiles — Markdown keeps its trailing whitespace to preserve
+  two-space line breaks (#44).
+
+### Changed
+
+- **Package postinstall hardened** (`packaging/nfpm/scripts/postinstall.sh`):
+  `set -euo pipefail` + `umask 077` at the top; `/var/lib/facegate/audit.log`
+  is created atomically via `install(1)` so there is no
+  `root:root 0644` window; `curl` runs with `--fail` so HTTP errors
+  aren't saved as fake archives; `sha256sum` is now mandatory and a
+  missing / mismatching checksum aborts the install; `unzip`
+  availability is checked before model extraction; `systemctl` errors
+  are surfaced (only suppressed when systemd is genuinely absent);
+  upgrades `try-restart` `facegate-brokerd.service`; the interactive
+  default for the ONNX Runtime / model downloads flipped from "yes"
+  to "no" (Ctrl-D no longer triggers a 400 MB pull); the template
+  migration takes exclusive control of `/var/lib/facegate/users`
+  before traversal and refuses to touch trees containing symlinks /
+  sockets / FIFOs / device nodes; `useradd` records
+  `--home-dir /var/lib/facegate` for clean auditing (refs #13).
+- **`install-dev.sh` brought to parity with the broker architecture**:
+  installs `facegate-brokerd` and its systemd unit, creates the
+  `facegate:facegate` system user/group, migrates template storage
+  ownership to the broker, creates the audit log atomically, and
+  enables / `try-restart`s `facegate-brokerd.service`. The old
+  `chown -R root:root /var/lib/facegate` that fought the v0.2.0
+  layout is gone (#29).
+- **`facegate(1)` man page refreshed for v0.2.0**: title bumped to
+  0.2.0, the broker becomes the trust boundary in DESCRIPTION, the
+  watch-daemon "How it works" section reflects `MatchFrame` (no more
+  in-daemon SCRFD/ArcFace), the manual PAM setup example uses the
+  absolute path `/usr/lib/security/pam_facegate.so`, FILES gains
+  `facegate-brokerd`, `facegate-brokerd.service`,
+  `/run/facegate/broker.sock`, the new `facegate:facegate` ownership
+  on `embeddings.json` and `audit.log`, SECURITY NOTES gains a "Trust
+  boundary: the broker" sub-section, the PAM helper timeout is
+  documented as 25 s (was 45 s), the same-UID attacker paragraph and
+  the Windows-Hello comparison are rewritten to reflect what v0.2.0
+  actually achieved vs what is still tracked (liveness PAD,
+  dual-camera, TPM sealing) (#31).
+- **`.gitignore` expanded** to cover the `dist/` output of
+  `scripts/package-nfpm.sh`, `*.deb` / `*.rpm` / `*.pkg.tar.zst` at
+  the repo root, backup files left by `session-auth` (`*.bak`,
+  `*.orig`, `*~`), local logs and `/tmp/` scratch, and common
+  OS / editor noise (#45).
+
+### Fixed
+
+- nFPM package manifest declared `license: MIT` while the repo and
+  every crate are GPL-3.0-or-later. The produced `.deb` / `.rpm` /
+  `.pkg.tar.zst` now advertise the license they actually ship under
+  (#30).
+
 ## [0.2.0] — 2026-05-11
 
 This release moves the biometric trust boundary into a dedicated broker
