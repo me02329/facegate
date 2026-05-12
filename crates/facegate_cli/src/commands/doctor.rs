@@ -171,6 +171,23 @@ pub fn run_streaming(
         Path::new(&config.camera.device).exists(),
         Some("run: facegate cameras  (no root needed) to find the right device"),
     );
+    if config.camera.cross_check.enabled {
+        let ir_ok = config
+            .camera
+            .ir_device
+            .as_deref()
+            .map(|device| Path::new(device).exists())
+            .unwrap_or(false);
+        all_ok &= chk(
+            tx,
+            &format!(
+                "IR camera device ({})",
+                config.camera.ir_device.as_deref().unwrap_or("<missing>")
+            ),
+            ir_ok,
+            Some("set [camera].ir_device to the IR / GREY camera, or disable [camera.cross_check]"),
+        );
+    }
 
     // Help users on dual-camera laptops realise they picked the RGB webcam
     // when the IR sensor would be more secure. We don't fail doctor for it —

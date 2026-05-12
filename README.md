@@ -105,9 +105,9 @@ Devices that report `GREY` / `Y8` / `Y800` formats are IR streams; devices
 that only report `YUYV` / `MJPG` are RGB. Update `[camera].device` in
 `/etc/facegate/config.toml` accordingly (or run `sudo facegate configure`).
 
-> **Dual-camera cross-check (planned, v0.3.0).** On laptops that expose
-> both an IR and an RGB sensor, Facegate will optionally require a match
-> on *both* streams to defeat single-camera photo/replay attacks.
+> **Dual-camera cross-check.** On laptops that expose both an IR and an
+> RGB sensor, Facegate can require a synchronized match on *both* streams
+> to reduce single-camera photo/replay attacks.
 > Tracked as `docs/security-issues/09-dual-camera-cross-check.md`.
 
 ---
@@ -373,11 +373,19 @@ ultimately go through `facegate-brokerd` over `/run/facegate/broker.sock`.
 ```toml
 [camera]
 device = "/dev/video0"
+# ir_device = "/dev/video2"  # optional IR stream for RGB+IR cross-check
 width = 640
 height = 480
 fps = 30
 timeout_ms = 5000
 warmup_frames = 5
+
+[camera.cross_check]
+enabled = false
+max_time_skew_ms = 50
+max_position_offset_px = 40.0
+min_identity_similarity = 0.55
+homography = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 
 [recognition]
 threshold = 0.55        # cosine similarity threshold (higher = stricter)
@@ -407,6 +415,14 @@ The `[security].cooldown_after_failures` / `cooldown_seconds` knobs are
 enforced server-side by the broker, per-peer-UID and per-username, so a
 hostile client cannot bypass the lockout by reconnecting.
 
+When `[camera.cross_check].enabled = true`, `camera.ir_device` must be
+configured. Auth clients capture both the primary RGB stream and the IR
+stream, then submit a `MatchFramePair` to the broker. The broker rejects the
+probe unless the pair is timestamp-synchronized, each stream contains exactly
+one face, the mapped RGB/IR landmark centroids are close, and the two
+embeddings are similar enough. Single-camera systems should leave this
+disabled.
+
 You can also use `facegate calibrate <USER> --write` to compute a
 threshold from real positive samples rather than guessing at
 `[recognition].threshold` by hand.
@@ -419,7 +435,7 @@ threshold from real positive samples rather than guessing at
 facegate/
 ├── crates/
 │   ├── facegate_core/      # camera, detection, embedding, matching, storage, config
-│   ├── facegate_ipc/       # versioned JSON-over-Unix-socket protocol (v2)
+│   ├── facegate_ipc/       # versioned JSON-over-Unix-socket protocol (v3)
 │   ├── facegate_brokerd/   # privileged broker daemon (facegate-brokerd)
 │   ├── facegate_cli/       # CLI + TUI + watch daemon (facegate binary)
 │   └── pam_facegate/       # PAM module (pam_facegate.so)
@@ -438,7 +454,7 @@ facegate/
 
 **`facegate_core`** handles the full ML pipeline: V4L2 capture, SCRFD face detection, ArcFace embedding extraction, cosine similarity matching, and secure template storage. Since v0.2.0 the detector + embedder are linked **only** into `facegate-brokerd`; the CLI and PAM helper rely on `facegate_core` exclusively for the V4L2 capture side.
 
-**`facegate_ipc`** defines the versioned JSON-over-Unix-socket protocol between clients and the broker. Protocol version is **v2**; clients built against v1 are rejected with `VersionMismatch`. Reinstall both the broker and the CLI together when upgrading.
+**`facegate_ipc`** defines the versioned JSON-over-Unix-socket protocol between clients and the broker. Protocol version is **v3**; mismatched clients are rejected with `VersionMismatch`. Reinstall both the broker and the CLI together when upgrading.
 
 **`facegate_brokerd`** is the new privileged broker (a system service started by systemd). It runs as the dedicated `facegate` user, owns all enrolled templates, performs face detection / embedding / matching on submitted frames, enforces rate limiting and lockouts, and writes the audit log. It does **not** open camera devices itself — frames arrive over the IPC socket.
 
@@ -495,7 +511,7 @@ client (any UID)          ──MatchFrame(raw frame)──▶   facegate-broker
 - **Peer credentials are enforced via `SO_PEERCRED`**, so the broker
   knows which UID owns each connection and can apply per-UID and
   per-username rate limits / lockouts.
-- **IPC protocol is versioned (v2).** A mismatched client is rejected
+- **IPC protocol is versioned (v3).** A mismatched client is rejected
   with `VersionMismatch`; you must reinstall the CLI and the broker
   together.
 
@@ -613,7 +629,7 @@ What is **not yet** equivalent to Windows Hello:
 | `video` group needed | no | no |
 | Network exposure | none (`PrivateNetwork=yes` on broker) | none |
 | D-Bus exposure | none | subscriber only (no listener) |
-| IPC exposure | AF_UNIX, `SO_PEERCRED`-checked, v2 protocol | AF_UNIX, `SO_PEERCRED`-checked, v2 protocol |
+| IPC exposure | AF_UNIX, `SO_PEERCRED`-checked, v3 protocol | AF_UNIX, `SO_PEERCRED`-checked, v3 protocol |
 | Forging a trigger | N/A — user initiates | requires impersonating systemd-logind (impossible for unprivileged code) |
 | Template readable by | `facegate` system user only | `facegate` system user only |
 | Replayable embedding bypass | blocked — `Match` restricted to uid=0, `MatchFrame` requires a frame | blocked — same as sudo path |

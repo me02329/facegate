@@ -405,6 +405,7 @@ The configuration file is TOML. The default path is:
 .B [camera]
 Camera device and capture settings. Common fields:
 .BR device ,
+.BR ir_device ,
 .BR width ,
 .BR height ,
 .BR fps ,
@@ -413,11 +414,28 @@ Camera device and capture settings. Common fields:
 .IP
 On Windows-Hello-style hardware,
 .B device
-should point at the IR sensor (typically
-.IR /dev/video2 " or " /dev/video4 ),
-not the RGB webcam. Run
+should normally point at the RGB webcam and
+.B ir_device
+can point at the IR sensor (typically
+.IR /dev/video2 " or " /dev/video4 )
+when RGB+IR cross-check is enabled. Run
 .B facegate cameras
 to discover which node is which on your laptop.
+.TP
+.B [camera.cross_check]
+Optional RGB+IR presentation-attack defence. When
+.B enabled
+is true,
+.B ir_device
+must be configured. The client submits a synchronized RGB+IR frame pair to the
+broker, which rejects the probe if timestamps, face positions, or cross-stream
+identity similarity disagree. Common fields:
+.BR enabled ,
+.BR max_time_skew_ms ,
+.BR max_position_offset_px ,
+.BR min_identity_similarity ,
+and
+.BR homography .
 .TP
 .B [recognition]
 Recognition policy:

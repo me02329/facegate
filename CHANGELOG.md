@@ -10,7 +10,7 @@ on a best-effort basis while the IPC protocol stabilises.
 In-progress work targeting **v0.3.0**. Focus so far: packaging
 reliability, install-time correctness, contributor ergonomics, and a
 documented security disclosure channel. The bigger features tracked
-for this release (dual-camera RGB+IR cross-check, broker subcommands,
+for this release (broker subcommands,
 emergency PAM rollback, liveness PAD groundwork) are still open.
 
 ### Added
@@ -26,6 +26,11 @@ emergency PAM rollback, liveness PAD groundwork) are still open.
 - `.editorconfig` covering Rust, TOML/YAML/JSON, Markdown, shell, and
   Makefiles — Markdown keeps its trailing whitespace to preserve
   two-space line breaks (#44).
+- Optional RGB+IR dual-stream cross-check for auth/watch paths. When
+  `[camera.cross_check].enabled = true` and `camera.ir_device` is set,
+  clients submit a synchronized `MatchFramePair`; the broker rejects
+  probes whose timestamps, mapped landmark positions, or cross-stream
+  identities disagree (#28).
 
 ### Changed
 
@@ -69,6 +74,8 @@ emergency PAM rollback, liveness PAD groundwork) are still open.
   the repo root, backup files left by `session-auth` (`*.bak`,
   `*.orig`, `*~`), local logs and `/tmp/` scratch, and common
   OS / editor noise (#45).
+- **IPC protocol bumped to v3** to add `MatchFramePair` and per-frame
+  capture timestamps for RGB+IR cross-check (#28).
 
 ### Fixed
 

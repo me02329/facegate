@@ -10,12 +10,13 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 pub const DEFAULT_SOCKET_PATH: &str = "/run/facegate/broker.sock";
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 /// Upper bound on the size of a request line accepted by the broker. Frames
-/// dominate this budget — 1920x1080 RGB after base64 is roughly 8.3 MB, which
-/// fits below this cap; smaller IR captures use well under 1 MB.
-pub const MAX_REQUEST_BYTES: usize = 12 * 1024 * 1024;
+/// dominate this budget — a single 1920x1080 RGB frame after base64 is roughly
+/// 8.3 MB, so a `MatchFramePair` (RGB + IR) at that resolution stays well below
+/// this cap. Smaller IR captures use much less.
+pub const MAX_REQUEST_BYTES: usize = 24 * 1024 * 1024;
 
 pub type Embedding = Vec<f32>;
 
@@ -116,6 +117,12 @@ pub enum Request {
         auth_scope: AuthScope,
         frame: FrameProbe,
     },
+    MatchFramePair {
+        username: String,
+        auth_scope: AuthScope,
+        rgb_frame: FrameProbe,
+        ir_frame: FrameProbe,
+    },
     Enroll {
         username: String,
         label: String,
@@ -136,6 +143,16 @@ pub struct FrameProbe {
     pub format: FrameFormat,
     pub width: u32,
     pub height: u32,
+    /// Wall-clock timestamp at which the client returned from
+    /// `capture_frame`, expressed as milliseconds since the UNIX epoch on the
+    /// client's clock. Used by the broker for the cross-check sync window
+    /// (`[camera.cross_check].max_time_skew_ms`). Both frames of a
+    /// `MatchFramePair` MUST come from the same client clock; the broker
+    /// compares their absolute difference and treats `0` as "missing"
+    /// (legacy v2 client → cross-check rejected). For a single `MatchFrame`
+    /// the value is informational.
+    #[serde(default)]
+    pub captured_at_ms: u64,
     #[serde(with = "base64_bytes")]
     pub bytes: Vec<u8>,
 }
@@ -315,6 +332,7 @@ mod tests {
             format: FrameFormat::Rgb8,
             width: 2,
             height: 1,
+            captured_at_ms: 123,
             bytes: vec![0, 1, 2, 253, 254, 255],
         };
         let envelope = RequestEnvelope::new(Request::MatchFrame {
@@ -338,6 +356,43 @@ mod tests {
             panic!("expected MatchFrame after round-trip");
         };
         assert_eq!(frame, probe);
+    }
+
+    #[test]
+    fn frame_pair_round_trips() {
+        let rgb = FrameProbe {
+            format: FrameFormat::Rgb8,
+            width: 1,
+            height: 1,
+            captured_at_ms: 1000,
+            bytes: vec![1, 2, 3],
+        };
+        let ir = FrameProbe {
+            format: FrameFormat::Gray8,
+            width: 1,
+            height: 1,
+            captured_at_ms: 1020,
+            bytes: vec![7],
+        };
+        let envelope = RequestEnvelope::new(Request::MatchFramePair {
+            username: "alice".to_owned(),
+            auth_scope: AuthScope::Session,
+            rgb_frame: rgb.clone(),
+            ir_frame: ir.clone(),
+        });
+
+        let json = serde_json::to_string(&envelope).expect("serialize");
+        let decoded: RequestEnvelope = serde_json::from_str(&json).expect("deserialize");
+        let Request::MatchFramePair {
+            rgb_frame,
+            ir_frame,
+            ..
+        } = decoded.request
+        else {
+            panic!("expected MatchFramePair after round-trip");
+        };
+        assert_eq!(rgb_frame, rgb);
+        assert_eq!(ir_frame, ir);
     }
 
     #[test]

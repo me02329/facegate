@@ -1,9 +1,31 @@
 use anyhow::{bail, Result};
+use facegate_core::camera::Frame;
 use facegate_core::storage::{AuthScope, EnrolledTemplate, TemplateScope};
 use facegate_ipc::{
-    send_request, AuditEvent, BrokerError, EnrolledTemplateSummary, ErrorCode, FrameProbe,
-    MatchResult, Request, RequestEnvelope, Response, DEFAULT_SOCKET_PATH,
+    send_request, AuditEvent, BrokerError, EnrolledTemplateSummary, ErrorCode, FrameFormat,
+    FrameProbe, MatchResult, Request, RequestEnvelope, Response, DEFAULT_SOCKET_PATH,
 };
+
+/// Wrap a freshly captured `Frame` in a `FrameProbe`, tagging it with the
+/// current wall-clock time so the broker can apply the RGB+IR sync window.
+/// `Frame::data` is always RGB24 (the camera layer converts YUYV / MJPEG /
+/// GREY → RGB before returning), so the format is always `Rgb8`.
+pub fn frame_probe(frame: Frame) -> FrameProbe {
+    FrameProbe {
+        format: FrameFormat::Rgb8,
+        width: frame.width,
+        height: frame.height,
+        captured_at_ms: now_ms(),
+        bytes: frame.data,
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
 
 pub fn match_embedding(
     username: &str,
@@ -32,6 +54,24 @@ pub fn match_frame(
     }
 }
 
+pub fn match_frame_pair(
+    username: &str,
+    auth_scope: AuthScope,
+    rgb_frame: FrameProbe,
+    ir_frame: FrameProbe,
+) -> Result<MatchResult> {
+    let request = Request::MatchFramePair {
+        username: username.to_owned(),
+        auth_scope: ipc_auth_scope(auth_scope),
+        rgb_frame,
+        ir_frame,
+    };
+    match self::request(request)? {
+        Response::Match { result } => Ok(result),
+        other => bail!("unexpected broker response: {other:?}"),
+    }
+}
+
 /// Submit a raw frame to the broker for detection + embedding + match. This
 /// is the trust-bounded auth path: the client never computes the embedding,
 /// so a same-UID attacker cannot bypass live capture by feeding a synthetic
@@ -47,6 +87,28 @@ pub fn match_frame_for_auth(
             username: username.to_owned(),
             auth_scope: ipc_auth_scope(auth_scope),
             frame,
+        }),
+    )?;
+    match response.response {
+        Response::Match { result } => Ok(result),
+        Response::Error(error) => Err(BrokerAuthError::Broker(error)),
+        other => Err(BrokerAuthError::Unexpected(format!("{other:?}"))),
+    }
+}
+
+pub fn match_frame_pair_for_auth(
+    username: &str,
+    auth_scope: AuthScope,
+    rgb_frame: FrameProbe,
+    ir_frame: FrameProbe,
+) -> std::result::Result<MatchResult, BrokerAuthError> {
+    let response = send_request(
+        DEFAULT_SOCKET_PATH,
+        RequestEnvelope::new(Request::MatchFramePair {
+            username: username.to_owned(),
+            auth_scope: ipc_auth_scope(auth_scope),
+            rgb_frame,
+            ir_frame,
         }),
     )?;
     match response.response {

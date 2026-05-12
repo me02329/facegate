@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use facegate_core::camera::Frame;
-use facegate_core::config::{Config, ModelsConfig, DEFAULT_CONFIG_PATH};
-use facegate_core::detection::ScrfdDetector;
+use facegate_core::config::{CameraConfig, Config, ModelsConfig, DEFAULT_CONFIG_PATH};
+use facegate_core::detection::{Detection, ScrfdDetector};
 use facegate_core::embedding::ArcFaceEmbedder;
 use facegate_core::error::FaceRsError;
 use facegate_core::matching::cosine_similarity;
@@ -149,6 +149,7 @@ struct BrokerState {
     min_face_size: u32,
     cooldown_after_failures: u32,
     cooldown_duration: Duration,
+    cross_check: CrossCheckPolicy,
     abuse: Arc<Mutex<AbuseState>>,
     models: ModelsConfig,
     /// SCRFD + ArcFace, lazily loaded on first MatchFrame request. Guarded by
@@ -160,6 +161,32 @@ struct BrokerState {
 struct InferenceState {
     detector: ScrfdDetector,
     embedder: ArcFaceEmbedder,
+}
+
+struct InferenceProbe {
+    detection: Detection,
+    embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+struct CrossCheckPolicy {
+    required: bool,
+    max_time_skew_ms: u64,
+    max_position_offset_px: f32,
+    min_identity_similarity: f32,
+    homography: [f32; 9],
+}
+
+impl CrossCheckPolicy {
+    fn from_config(config: &CameraConfig) -> Self {
+        Self {
+            required: config.cross_check.enabled && config.ir_device.is_some(),
+            max_time_skew_ms: config.cross_check.max_time_skew_ms,
+            max_position_offset_px: config.cross_check.max_position_offset_px,
+            min_identity_similarity: config.cross_check.min_identity_similarity,
+            homography: config.cross_check.homography,
+        }
+    }
 }
 
 impl BrokerState {
@@ -177,6 +204,7 @@ impl BrokerState {
             min_face_size: config.recognition.min_face_size,
             cooldown_after_failures: config.security.cooldown_after_failures,
             cooldown_duration: Duration::from_secs(config.security.cooldown_seconds),
+            cross_check: CrossCheckPolicy::from_config(&config.camera),
             abuse: Arc::new(Mutex::new(AbuseState::default())),
             models: config.models,
             inference: Arc::new(Mutex::new(None)),
@@ -234,6 +262,23 @@ impl BrokerState {
                 let response =
                     self.match_frame(peer, &username, core_auth_scope(auth_scope), &frame);
                 frame.bytes.zeroize();
+                response
+            }
+            Request::MatchFramePair {
+                username,
+                auth_scope,
+                mut rgb_frame,
+                mut ir_frame,
+            } => {
+                let response = self.match_frame_pair(
+                    peer,
+                    &username,
+                    core_auth_scope(auth_scope),
+                    &rgb_frame,
+                    &ir_frame,
+                );
+                rgb_frame.bytes.zeroize();
+                ir_frame.bytes.zeroize();
                 response
             }
             Request::Enroll {
@@ -414,6 +459,10 @@ impl BrokerState {
             }
         }
 
+        if self.cross_check.required {
+            return self.cross_check_mismatch(username, auth_scope);
+        }
+
         let mut frame = match frame_from_probe(probe) {
             Ok(frame) => frame,
             Err(err) => {
@@ -470,6 +519,146 @@ impl BrokerState {
         response
     }
 
+    fn match_frame_pair(
+        &self,
+        peer: Option<PeerCredentials>,
+        username: &str,
+        auth_scope: AuthScope,
+        rgb_probe: &FrameProbe,
+        ir_probe: &FrameProbe,
+    ) -> ResponseEnvelope {
+        if !self.cross_check.required {
+            return self.match_frame(peer, username, auth_scope, rgb_probe);
+        }
+        if !authorized_for_match(peer, username, auth_scope) {
+            self.write_audit(
+                username,
+                auth_scope,
+                AuditOutcome::Failure,
+                AuditReason::Unauthorized,
+            );
+            return unauthorized();
+        }
+        let Some(peer) = peer else {
+            self.write_audit(
+                username,
+                auth_scope,
+                AuditOutcome::Failure,
+                AuditReason::Unauthorized,
+            );
+            return unauthorized();
+        };
+        match self.check_match_allowed(peer, username) {
+            Ok(()) => {}
+            Err((error, reason)) => {
+                self.write_audit(username, auth_scope, AuditOutcome::Failure, reason);
+                return error;
+            }
+        }
+
+        if !frames_are_synchronized(
+            rgb_probe.captured_at_ms,
+            ir_probe.captured_at_ms,
+            self.cross_check.max_time_skew_ms,
+        ) {
+            return self.cross_check_mismatch(username, auth_scope);
+        }
+
+        let mut rgb_frame = match frame_from_probe(rgb_probe) {
+            Ok(frame) => frame,
+            Err(err) => return self.cross_check_internal(username, auth_scope, err),
+        };
+        let mut ir_frame = match frame_from_probe(ir_probe) {
+            Ok(frame) => frame,
+            Err(err) => {
+                rgb_frame.data.zeroize();
+                return self.cross_check_internal(username, auth_scope, err);
+            }
+        };
+
+        let mut rgb_probe = match self.run_inference_strict(&rgb_frame) {
+            Ok(Some(probe)) => probe,
+            Ok(None) => {
+                rgb_frame.data.zeroize();
+                ir_frame.data.zeroize();
+                return self.cross_check_mismatch(username, auth_scope);
+            }
+            Err(err) => {
+                rgb_frame.data.zeroize();
+                ir_frame.data.zeroize();
+                return self.cross_check_internal(username, auth_scope, err);
+            }
+        };
+        let mut ir_probe = match self.run_inference_strict(&ir_frame) {
+            Ok(Some(probe)) => probe,
+            Ok(None) => {
+                rgb_probe.embedding.zeroize();
+                rgb_frame.data.zeroize();
+                ir_frame.data.zeroize();
+                return self.cross_check_mismatch(username, auth_scope);
+            }
+            Err(err) => {
+                rgb_probe.embedding.zeroize();
+                rgb_frame.data.zeroize();
+                ir_frame.data.zeroize();
+                return self.cross_check_internal(username, auth_scope, err);
+            }
+        };
+        rgb_frame.data.zeroize();
+        ir_frame.data.zeroize();
+
+        let consistency = cross_stream_consistency(
+            &rgb_probe,
+            &ir_probe,
+            &self.cross_check.homography,
+            self.cross_check.max_position_offset_px,
+            self.cross_check.min_identity_similarity,
+        );
+        if !consistency {
+            rgb_probe.embedding.zeroize();
+            ir_probe.embedding.zeroize();
+            return self.cross_check_mismatch(username, auth_scope);
+        }
+
+        let response = self.compare_embedding(username, auth_scope, &rgb_probe.embedding);
+        rgb_probe.embedding.zeroize();
+        ir_probe.embedding.zeroize();
+        response
+    }
+
+    fn cross_check_mismatch(&self, username: &str, auth_scope: AuthScope) -> ResponseEnvelope {
+        self.record_match_failure(username);
+        self.write_audit(
+            username,
+            auth_scope,
+            AuditOutcome::Failure,
+            AuditReason::Mismatch,
+        );
+        ResponseEnvelope::ok(Response::Match {
+            result: MatchResult {
+                matched: false,
+                score: None,
+                template_id: None,
+            },
+        })
+    }
+
+    fn cross_check_internal(
+        &self,
+        username: &str,
+        auth_scope: AuthScope,
+        err: ResponseEnvelope,
+    ) -> ResponseEnvelope {
+        self.record_match_failure(username);
+        self.write_audit(
+            username,
+            auth_scope,
+            AuditOutcome::Failure,
+            AuditReason::Internal,
+        );
+        err
+    }
+
     /// Lock the inference state, lazily loading SCRFD + ArcFace on first use,
     /// then detect+embed the largest face. Returns Ok(None) when no face is
     /// found in the frame.
@@ -477,6 +666,23 @@ impl BrokerState {
         &self,
         frame: &Frame,
     ) -> std::result::Result<Option<Vec<f32>>, ResponseEnvelope> {
+        Ok(self
+            .run_inference_details(frame, false)?
+            .map(|probe| probe.embedding))
+    }
+
+    fn run_inference_strict(
+        &self,
+        frame: &Frame,
+    ) -> std::result::Result<Option<InferenceProbe>, ResponseEnvelope> {
+        self.run_inference_details(frame, true)
+    }
+
+    fn run_inference_details(
+        &self,
+        frame: &Frame,
+        require_exactly_one_face: bool,
+    ) -> std::result::Result<Option<InferenceProbe>, ResponseEnvelope> {
         let mut guard = self.inference.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
             *guard = Some(load_inference(&self.models).map_err(|e| {
@@ -494,10 +700,17 @@ impl BrokerState {
                 ResponseEnvelope::error(ErrorCode::Internal, "face detection failed")
             })?;
 
-        let Some(detection) = detections
+        let detection = if require_exactly_one_face {
+            if detections.len() != 1 {
+                return Ok(None);
+            }
+            detections.into_iter().next().expect("len checked")
+        } else if let Some(detection) = detections
             .into_iter()
             .max_by(|a, b| a.bbox.area().total_cmp(&b.bbox.area()))
-        else {
+        {
+            detection
+        } else {
             return Ok(None);
         };
 
@@ -505,7 +718,10 @@ impl BrokerState {
             tracing::warn!("embedding error: {e}");
             ResponseEnvelope::error(ErrorCode::Internal, "face embedding failed")
         })?;
-        Ok(Some(embedding))
+        Ok(Some(InferenceProbe {
+            detection,
+            embedding,
+        }))
     }
 
     fn enroll(
@@ -946,6 +1162,61 @@ fn frame_from_probe(probe: &FrameProbe) -> std::result::Result<Frame, ResponseEn
     })
 }
 
+fn frames_are_synchronized(a_ms: u64, b_ms: u64, max_skew_ms: u64) -> bool {
+    if a_ms == 0 || b_ms == 0 {
+        return false;
+    }
+    a_ms.abs_diff(b_ms) <= max_skew_ms
+}
+
+fn cross_stream_consistency(
+    rgb: &InferenceProbe,
+    ir: &InferenceProbe,
+    homography: &[f32; 9],
+    max_position_offset_px: f32,
+    min_identity_similarity: f32,
+) -> bool {
+    let rgb_centroid = landmark_centroid(rgb);
+    let ir_centroid = landmark_centroid(ir);
+    let Some(mapped_ir) = apply_homography(ir_centroid, homography) else {
+        return false;
+    };
+    let dx = rgb_centroid.0 - mapped_ir.0;
+    let dy = rgb_centroid.1 - mapped_ir.1;
+    let position_offset = (dx * dx + dy * dy).sqrt();
+    if !position_offset.is_finite() || position_offset > max_position_offset_px {
+        return false;
+    }
+
+    let identity = cosine_similarity(&rgb.embedding, &ir.embedding);
+    identity.is_finite() && identity >= min_identity_similarity
+}
+
+fn landmark_centroid(probe: &InferenceProbe) -> (f32, f32) {
+    let mut x = 0.0;
+    let mut y = 0.0;
+    for (px, py) in probe.detection.landmarks.points {
+        x += px;
+        y += py;
+    }
+    (x / 5.0, y / 5.0)
+}
+
+fn apply_homography(point: (f32, f32), h: &[f32; 9]) -> Option<(f32, f32)> {
+    let (x, y) = point;
+    let denom = h[6] * x + h[7] * y + h[8];
+    if !denom.is_finite() || denom.abs() < f32::EPSILON {
+        return None;
+    }
+    let mapped_x = (h[0] * x + h[1] * y + h[2]) / denom;
+    let mapped_y = (h[3] * x + h[4] * y + h[5]) / denom;
+    if mapped_x.is_finite() && mapped_y.is_finite() {
+        Some((mapped_x, mapped_y))
+    } else {
+        None
+    }
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -956,6 +1227,7 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use facegate_core::detection::{BoundingBox, Landmarks};
     use facegate_ipc::{AuthScope as IpcAuthScope, TemplateScope as IpcTemplateScope};
 
     fn unit_vec(v: &[f32]) -> Vec<f32> {
@@ -972,6 +1244,13 @@ mod tests {
             min_face_size: 80,
             cooldown_after_failures: 10,
             cooldown_duration: Duration::from_secs(60),
+            cross_check: CrossCheckPolicy {
+                required: false,
+                max_time_skew_ms: 50,
+                max_position_offset_px: 40.0,
+                min_identity_similarity: 0.55,
+                homography: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            },
             abuse: Arc::new(Mutex::new(AbuseState::default())),
             models: facegate_core::config::ModelsConfig {
                 detector: std::path::PathBuf::new(),
@@ -1205,6 +1484,7 @@ mod tests {
                     format: facegate_ipc::FrameFormat::Rgb8,
                     width: 4,
                     height: 4,
+                    captured_at_ms: 1,
                     bytes: vec![0; 10], // expected 48 bytes
                 },
             }),
@@ -1227,6 +1507,7 @@ mod tests {
                     format: facegate_ipc::FrameFormat::Gray8,
                     width: 8192,
                     height: 8192,
+                    captured_at_ms: 1,
                     bytes: vec![],
                 },
             }),
@@ -1244,6 +1525,7 @@ mod tests {
             format: facegate_ipc::FrameFormat::Bgr8,
             width: 1,
             height: 1,
+            captured_at_ms: 1,
             bytes: vec![10, 20, 30], // B=10, G=20, R=30
         };
         let frame = frame_from_probe(&probe).expect("decode");
@@ -1256,10 +1538,118 @@ mod tests {
             format: facegate_ipc::FrameFormat::Gray8,
             width: 2,
             height: 1,
+            captured_at_ms: 1,
             bytes: vec![42, 200],
         };
         let frame = frame_from_probe(&probe).expect("decode");
         assert_eq!(frame.data, vec![42, 42, 42, 200, 200, 200]);
+    }
+
+    #[test]
+    fn cross_check_required_rejects_single_frame() {
+        let (_dir, mut state) = test_state();
+        state.cross_check.required = true;
+        let response = state.dispatch(
+            RequestEnvelope::new(Request::MatchFrame {
+                username: "alice".to_owned(),
+                auth_scope: IpcAuthScope::Session,
+                frame: facegate_ipc::FrameProbe {
+                    format: facegate_ipc::FrameFormat::Rgb8,
+                    width: 1,
+                    height: 1,
+                    captured_at_ms: 1,
+                    bytes: vec![0, 0, 0],
+                },
+            }),
+            Some(PeerCredentials { uid: 0 }),
+        );
+        let Response::Match { result } = response.response else {
+            panic!("expected match response");
+        };
+        assert!(!result.matched);
+        assert_eq!(result.score, None);
+    }
+
+    #[test]
+    fn cross_check_rejects_unsynchronized_frames() {
+        let (_dir, mut state) = test_state();
+        state.cross_check.required = true;
+        let response = state.dispatch(
+            RequestEnvelope::new(Request::MatchFramePair {
+                username: "alice".to_owned(),
+                auth_scope: IpcAuthScope::Session,
+                rgb_frame: one_pixel_rgb(100),
+                ir_frame: one_pixel_rgb(200),
+            }),
+            Some(PeerCredentials { uid: 0 }),
+        );
+        let Response::Match { result } = response.response else {
+            panic!("expected match response");
+        };
+        assert!(!result.matched);
+        assert_eq!(result.score, None);
+    }
+
+    #[test]
+    fn cross_stream_consistency_rejects_position_mismatch() {
+        let rgb = inference_probe((10.0, 10.0), unit_vec(&[1.0, 0.0]));
+        let ir = inference_probe((100.0, 100.0), unit_vec(&[1.0, 0.0]));
+        assert!(!cross_stream_consistency(
+            &rgb,
+            &ir,
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            40.0,
+            0.55,
+        ));
+    }
+
+    #[test]
+    fn cross_stream_consistency_rejects_identity_mismatch() {
+        let rgb = inference_probe((10.0, 10.0), unit_vec(&[1.0, 0.0]));
+        let ir = inference_probe((12.0, 12.0), unit_vec(&[0.0, 1.0]));
+        assert!(!cross_stream_consistency(
+            &rgb,
+            &ir,
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            40.0,
+            0.55,
+        ));
+    }
+
+    #[test]
+    fn cross_stream_consistency_accepts_happy_path() {
+        let rgb = inference_probe((40.0, 30.0), unit_vec(&[1.0, 0.0]));
+        let ir = inference_probe((30.0, 25.0), unit_vec(&[0.98, 0.02]));
+        let homography = [1.0, 0.0, 10.0, 0.0, 1.0, 5.0, 0.0, 0.0, 1.0];
+        assert!(cross_stream_consistency(&rgb, &ir, &homography, 5.0, 0.55,));
+    }
+
+    fn one_pixel_rgb(captured_at_ms: u64) -> facegate_ipc::FrameProbe {
+        facegate_ipc::FrameProbe {
+            format: facegate_ipc::FrameFormat::Rgb8,
+            width: 1,
+            height: 1,
+            captured_at_ms,
+            bytes: vec![0, 0, 0],
+        }
+    }
+
+    fn inference_probe(centroid: (f32, f32), embedding: Vec<f32>) -> InferenceProbe {
+        InferenceProbe {
+            detection: Detection {
+                bbox: BoundingBox {
+                    x1: centroid.0 - 5.0,
+                    y1: centroid.1 - 5.0,
+                    x2: centroid.0 + 5.0,
+                    y2: centroid.1 + 5.0,
+                    confidence: 1.0,
+                },
+                landmarks: Landmarks {
+                    points: [centroid; 5],
+                },
+            },
+            embedding,
+        }
     }
 
     #[test]

@@ -1,8 +1,10 @@
 # [Security] Add RGB+IR dual-stream cross-check as presentation attack defense
 
-## Priority
+## Status
 
-Low. Target milestone 0.3.0, after broker-side `MatchFrame` (closed), liveness PAD (#06), and TPM sealing (#07) are in place.
+Implemented for the broker/client auth path as protocol v3. Calibration tooling
+is still manual: operators must provide the homography in
+`[camera.cross_check].homography` until `facegate calibrate-cameras` exists.
 
 ## Problem
 
@@ -35,13 +37,13 @@ min_identity_similarity = 0.55
 
 Pipeline changes:
 
-1. Open both V4L2 devices simultaneously and grab a frame from each within `max_time_skew_ms` using V4L2 timestamps (no hardware sync needed; soft-sync via timestamp is acceptable for ~30 fps).
+1. Open both V4L2 devices and grab a frame from each within `max_time_skew_ms` using client-side capture timestamps (no hardware sync needed; soft-sync is acceptable for ~30 fps).
 2. Run SCRFD on both frames. Reject if either has no face or more than one face.
 3. Apply a per-model homography mapping IR landmarks into RGB pixel coordinates. Reject if the mapped IR centroid is more than `max_position_offset_px` from the RGB centroid.
 4. Run ArcFace on both crops. Reject if cosine similarity between the two embeddings is below `min_identity_similarity` (loose, since RGB vs IR of the same face are not identical).
 5. Match the RGB embedding against the enrolled template using the existing match logic.
 
-All inference and consistency checks happen inside `facegate-brokerd`. The client submits both frames (extending `Request::MatchFrame` to `Request::MatchFramePair` or adding an optional second `FrameProbe` field).
+All inference and consistency checks happen inside `facegate-brokerd`. The client submits both frames with `Request::MatchFramePair`.
 
 ## Calibration
 
@@ -52,6 +54,17 @@ The homography mapping IR↔RGB depends on the physical offset and lens distorti
 
 Calibration is the long pole — without it the cross-check produces too many false rejects.
 
+Current operator path:
+
+1. Use `facegate cameras` to identify the RGB and IR nodes.
+2. Set `camera.device` to RGB and `camera.ir_device` to IR.
+3. Start with the identity homography only if the two streams are already well
+   aligned.
+4. For strict deployments, estimate the IR→RGB homography out of band and write
+   the nine values to `[camera.cross_check].homography`.
+5. Enable `[camera.cross_check].enabled = true`, then run
+   `sudo facegate test <USER>` before enabling PAM.
+
 ## Open questions
 
 - Should cross-check be enforced for sudo scope only, or for session scope as well? (Trades convenience for sudo strength.)
@@ -60,11 +73,16 @@ Calibration is the long pole — without it the cross-check produces too many fa
 
 ## Acceptance criteria
 
-- Config accepts `ir_device` and `[camera.cross_check]` and validates them.
-- Broker can ingest a synchronized RGB+IR frame pair and produce one match decision.
-- Tests cover: missing second stream (fail closed), unsynchronized frames, position mismatch, identity mismatch, and the happy path with paired live frames.
-- Calibration path is documented; tested on at least one widely available module (Chicony 04f2:b829 or equivalent).
-- Auth path remains usable on single-camera systems (cross-check disabled or `ir_device` absent).
+- [x] Config accepts `ir_device` and `[camera.cross_check]` and validates them.
+- [x] Broker can ingest a synchronized RGB+IR frame pair and produce one match decision.
+- [x] Tests cover: missing second stream (fail closed), unsynchronized frames, position mismatch, identity mismatch, and the consistency happy path.
+- [x] Calibration path is documented.
+- [x] Auth path remains usable on single-camera systems (cross-check disabled).
+
+Remaining follow-up:
+
+- Provide `facegate calibrate-cameras` to compute the homography locally.
+- Test and publish presets for common Chicony/Realtek laptop modules.
 
 ## Out of scope
 

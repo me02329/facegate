@@ -1,8 +1,9 @@
 [camera]
-# Pick the camera that points at you. On laptops with Windows-Hello-style
+# Pick the primary RGB camera that points at you. On laptops with Windows-Hello-style
 # hardware you have *two* devices: a normal RGB webcam (typically /dev/video0)
 # and an IR / depth sensor (often /dev/video2 or /dev/video4). Both work for
-# enrollment and recognition, but the IR camera is strongly preferred:
+# enrollment and recognition. For the stronger Windows-Hello-style path, set
+# device to RGB and ir_device to the IR stream, then enable cross_check below:
 #
 #   - it works in the dark, so screen-unlock keeps working at night;
 #   - it's much harder to spoof with a printed photo than an RGB feed.
@@ -15,11 +16,31 @@
 # Devices reporting GREY / Y8 / Y800 are the IR streams. Devices reporting
 # only YUYV / MJPG are RGB.
 device = "/dev/video0"
+# ir_device = "/dev/video2"
 width = 640
 height = 360
 fps = 30
 timeout_ms = 5000
 warmup_frames = 3
+
+[camera.cross_check]
+# When enabled, auth uses a synchronized RGB+IR pair and the broker rejects
+# probes whose timestamps, face positions, or RGB/IR identities disagree.
+# Requires camera.ir_device. Leave disabled on single-camera systems.
+enabled = false
+max_time_skew_ms = 50
+max_position_offset_px = 40.0
+min_identity_similarity = 0.55
+# Homography mapping IR landmark coordinates into RGB pixel coordinates.
+# Stored row-major: [a, b, tx, c, d, ty, g, h, 1] for
+#     [ a  b  tx ]
+#     [ c  d  ty ]
+#     [ g  h   1 ]
+# Identity is a safe default only when the two sensors are already pixel-
+# aligned; real laptops with an IR module physically offset from the RGB
+# camera need per-device calibration. A calibration helper is tracked as a
+# follow-up in docs/security-issues/09-dual-camera-cross-check.md.
+homography = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 
 [recognition]
 threshold = 0.55

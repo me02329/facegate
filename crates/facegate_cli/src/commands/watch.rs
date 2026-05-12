@@ -11,9 +11,9 @@ use facegate_core::camera::V4lCamera;
 use facegate_core::config::Config;
 use facegate_core::error::FaceRsError;
 use facegate_core::storage::AuthScope;
-use facegate_ipc::{FrameFormat, FrameProbe};
 
 use crate::commands::broker;
+use crate::commands::broker::frame_probe;
 
 // ── D-Bus proxies ─────────────────────────────────────────────────────────────
 
@@ -197,6 +197,7 @@ fn run_recognition(
         return;
     }
 
+    let cross_check = config.camera.cross_check.enabled && config.camera.ir_device.is_some();
     let mut camera = match V4lCamera::open(
         &config.camera.device,
         config.camera.width,
@@ -213,6 +214,30 @@ fn run_recognition(
             return;
         }
     };
+    let mut ir_camera = if cross_check {
+        let Some(ir_device) = config.camera.ir_device.as_deref() else {
+            tracing::error!("cross-check is enabled but camera.ir_device is missing");
+            return;
+        };
+        match V4lCamera::open(
+            ir_device,
+            config.camera.width,
+            config.camera.height,
+            config.camera.fps,
+            config.camera.timeout_ms,
+        ) {
+            Ok(mut cam) => {
+                cam.warmup(config.camera.warmup_frames);
+                Some(cam)
+            }
+            Err(e) => {
+                tracing::error!("cannot open IR camera: {e}");
+                return;
+            }
+        }
+    } else {
+        None
+    };
 
     let required = config.recognition.required_matches.max(1);
     let mut matches: u32 = 0;
@@ -225,13 +250,29 @@ fn run_recognition(
 
         match camera.capture_frame() {
             Ok(frame) => {
-                let probe = FrameProbe {
-                    format: FrameFormat::Rgb8,
-                    width: frame.width,
-                    height: frame.height,
-                    bytes: frame.data,
+                let result = if let Some(ir_camera) = ir_camera.as_mut() {
+                    let rgb_probe = frame_probe(frame);
+                    let ir_frame = match ir_camera.capture_frame() {
+                        Ok(frame) => frame,
+                        Err(FaceRsError::Timeout) => {
+                            tracing::debug!(attempt, "IR capture timeout");
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::error!("IR capture error: {e}");
+                            return;
+                        }
+                    };
+                    broker::match_frame_pair(
+                        username,
+                        AuthScope::Session,
+                        rgb_probe,
+                        frame_probe(ir_frame),
+                    )
+                } else {
+                    broker::match_frame(username, AuthScope::Session, frame_probe(frame))
                 };
-                match broker::match_frame(username, AuthScope::Session, probe) {
+                match result {
                     Ok(result) if result.matched => {
                         matches += 1;
                         tracing::debug!(

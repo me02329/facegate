@@ -2,19 +2,21 @@ use facegate_core::camera::V4lCamera;
 use facegate_core::config::Config;
 use facegate_core::error::{AuthExitCode, FaceRsError};
 use facegate_core::storage::AuthScope;
-use facegate_ipc::{ErrorCode, FrameFormat, FrameProbe};
+use facegate_ipc::ErrorCode;
 
 use crate::commands::broker;
+use crate::commands::broker::frame_probe;
 
 /// Non-interactive authentication called by the PAM module.
 /// Returns an exit code — caller must pass it to std::process::exit.
 ///
-/// Since protocol v2 the client only captures frames; SCRFD + ArcFace and the
+/// Since broker-side MatchFrame the client only captures frames; SCRFD + ArcFace and the
 /// match decision live inside facegate-brokerd, which means a same-UID
 /// attacker cannot bypass live capture by submitting a precomputed embedding.
 pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCode {
     tracing::info!("auth requested for '{username}'");
     let auth_scope = auth_scope_for_service(service);
+    let cross_check = cross_check_enabled(config);
 
     let mut camera = match V4lCamera::open(
         &config.camera.device,
@@ -39,6 +41,38 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
             tracing::error!("camera open error: {e}");
             return AuthExitCode::InternalError;
         }
+    };
+    let mut ir_camera = if cross_check {
+        let Some(ir_device) = config.camera.ir_device.as_deref() else {
+            tracing::error!("cross-check is enabled but camera.ir_device is missing");
+            return AuthExitCode::InternalError;
+        };
+        match V4lCamera::open(
+            ir_device,
+            config.camera.width,
+            config.camera.height,
+            config.camera.fps,
+            config.camera.timeout_ms,
+        ) {
+            Ok(mut cam) => {
+                cam.warmup(config.camera.warmup_frames);
+                Some(cam)
+            }
+            Err(FaceRsError::Camera(msg)) => {
+                eprintln!("Facegate: IR camera error: {msg}");
+                return if config.security.deny_on_camera_error {
+                    AuthExitCode::CameraError
+                } else {
+                    fallback_or_deny(config)
+                };
+            }
+            Err(e) => {
+                tracing::error!("IR camera open error: {e}");
+                return AuthExitCode::InternalError;
+            }
+        }
+    } else {
+        None
     };
 
     let mut matches = 0_u32;
@@ -65,14 +99,35 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
             }
         };
 
-        let probe = FrameProbe {
-            format: FrameFormat::Rgb8,
-            width: frame.width,
-            height: frame.height,
-            bytes: frame.data,
+        let result = if let Some(ir_camera) = ir_camera.as_mut() {
+            let rgb_probe = frame_probe(frame);
+            let ir_frame = match ir_camera.capture_frame() {
+                Ok(f) => f,
+                Err(FaceRsError::Timeout) => {
+                    saw_timeout = true;
+                    tracing::warn!(attempt, "IR face auth timed out for '{username}'");
+                    continue;
+                }
+                Err(FaceRsError::Camera(msg)) => {
+                    eprintln!("Facegate: IR camera error during capture: {msg}");
+                    return if config.security.deny_on_camera_error {
+                        AuthExitCode::CameraError
+                    } else {
+                        fallback_or_deny(config)
+                    };
+                }
+                Err(e) => {
+                    tracing::error!("IR capture error: {e}");
+                    return AuthExitCode::InternalError;
+                }
+            };
+            let ir_probe = frame_probe(ir_frame);
+            broker::match_frame_pair_for_auth(username, auth_scope, rgb_probe, ir_probe)
+        } else {
+            broker::match_frame_for_auth(username, auth_scope, frame_probe(frame))
         };
 
-        match broker::match_frame_for_auth(username, auth_scope, probe) {
+        match result {
             Ok(result) if result.matched => {
                 matches += 1;
                 tracing::debug!(
@@ -107,6 +162,10 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
         return timeout_or_deny(config);
     }
     fallback_or_deny(config)
+}
+
+fn cross_check_enabled(config: &Config) -> bool {
+    config.camera.cross_check.enabled && config.camera.ir_device.is_some()
 }
 
 fn auth_scope_for_service(service: Option<&str>) -> AuthScope {

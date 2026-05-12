@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use facegate_core::config::{
-    CameraConfig, Config, LoggingConfig, ModelsConfig, RecognitionConfig, SecurityConfig,
-    StorageConfig,
+    CameraConfig, CameraCrossCheckConfig, Config, LoggingConfig, ModelsConfig, RecognitionConfig,
+    SecurityConfig, StorageConfig,
 };
 use std::path::PathBuf;
 
@@ -172,8 +172,13 @@ fn build_sections(cfg: &Config) -> Vec<Section> {
             fields: vec![
                 Field {
                     key: "device",
-                    description: "Camera device path (e.g. /dev/video2)",
+                    description: "Primary RGB camera device path (e.g. /dev/video0)",
                     value: cfg.camera.device.clone(),
+                },
+                Field {
+                    key: "ir_device",
+                    description: "Optional IR camera path for RGB+IR cross-check",
+                    value: cfg.camera.ir_device.clone().unwrap_or_default(),
                 },
                 Field {
                     key: "width",
@@ -199,6 +204,26 @@ fn build_sections(cfg: &Config) -> Vec<Section> {
                     key: "warmup_frames",
                     description: "Frames to discard before capturing",
                     value: cfg.camera.warmup_frames.to_string(),
+                },
+                Field {
+                    key: "cross_check_enabled",
+                    description: "Require synchronized RGB+IR cross-check (true/false)",
+                    value: cfg.camera.cross_check.enabled.to_string(),
+                },
+                Field {
+                    key: "cross_check_max_time_skew_ms",
+                    description: "Maximum RGB/IR capture timestamp skew in milliseconds",
+                    value: cfg.camera.cross_check.max_time_skew_ms.to_string(),
+                },
+                Field {
+                    key: "cross_check_max_position_offset_px",
+                    description: "Maximum mapped RGB/IR landmark centroid offset in pixels",
+                    value: cfg.camera.cross_check.max_position_offset_px.to_string(),
+                },
+                Field {
+                    key: "cross_check_min_identity_similarity",
+                    description: "Minimum RGB/IR ArcFace similarity [0.0 – 1.0]",
+                    value: cfg.camera.cross_check.min_identity_similarity.to_string(),
                 },
             ],
         },
@@ -301,15 +326,43 @@ fn parse_camera(section: &Section, base: &CameraConfig) -> anyhow::Result<Camera
     for f in &section.fields {
         match f.key {
             "device" => cfg.device = f.value.clone(),
+            "ir_device" => {
+                let trimmed = f.value.trim();
+                cfg.ir_device = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+            }
             "width" => cfg.width = parse_u32(&f.value, f.key)?,
             "height" => cfg.height = parse_u32(&f.value, f.key)?,
             "fps" => cfg.fps = parse_u32(&f.value, f.key)?,
             "timeout_ms" => cfg.timeout_ms = parse_u64(&f.value, f.key)?,
             "warmup_frames" => cfg.warmup_frames = parse_u32(&f.value, f.key)?,
+            "cross_check_enabled" => cfg.cross_check.enabled = parse_bool(&f.value, f.key)?,
+            "cross_check_max_time_skew_ms" => {
+                cfg.cross_check.max_time_skew_ms = parse_u64(&f.value, f.key)?
+            }
+            "cross_check_max_position_offset_px" => {
+                cfg.cross_check.max_position_offset_px = parse_f32(&f.value, f.key)?
+            }
+            "cross_check_min_identity_similarity" => {
+                cfg.cross_check.min_identity_similarity = parse_f32(&f.value, f.key)?
+            }
             _ => {}
         }
     }
+    fill_cross_check_defaults(&mut cfg.cross_check);
     Ok(cfg)
+}
+
+fn fill_cross_check_defaults(cfg: &mut CameraCrossCheckConfig) {
+    let defaults = CameraCrossCheckConfig::default();
+    if cfg.max_time_skew_ms == 0 {
+        cfg.max_time_skew_ms = defaults.max_time_skew_ms;
+    }
+    if cfg.max_position_offset_px == 0.0 {
+        cfg.max_position_offset_px = defaults.max_position_offset_px;
+    }
+    if cfg.min_identity_similarity == 0.0 {
+        cfg.min_identity_similarity = defaults.min_identity_similarity;
+    }
 }
 
 fn parse_recognition(

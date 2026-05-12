@@ -81,9 +81,32 @@ fn print_broker() {
 fn print_camera(config: &Config) {
     println!("Camera");
     let path = Path::new(&config.camera.device);
-    println!("  device : {}", config.camera.device);
-    println!("  exists : {}", yes_no(path.exists()));
-    println!("  kind   : {}", camera_kind(path));
+    println!("  rgb    : {}", config.camera.device);
+    println!(
+        "           exists={} kind={}",
+        yes_no(path.exists()),
+        camera_kind(path)
+    );
+    match config.camera.ir_device.as_deref() {
+        Some(ir_device) => {
+            let ir_path = Path::new(ir_device);
+            println!("  ir     : {ir_device}");
+            println!(
+                "           exists={} kind={}",
+                yes_no(ir_path.exists()),
+                camera_kind(ir_path)
+            );
+        }
+        None => println!("  ir     : not configured"),
+    }
+    println!(
+        "  check  : {}",
+        if config.camera.cross_check.enabled {
+            "RGB+IR required"
+        } else {
+            "single camera"
+        }
+    );
     println!();
 }
 
