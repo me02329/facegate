@@ -1,0 +1,64 @@
+name: Deploy docs site
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'docs/book/**'
+      - 'docs/threat-model.md'
+      - 'docs/recovery.md'
+      - '.github/workflows/pages.yml'
+
+  workflow_dispatch:
+
+# Allow only one concurrent deployment, but don't cancel an in-flight
+# run — let any pending one wait its turn.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    name: Build mdBook
+    runs-on: ubuntu-latest
+
+    env:
+      MDBOOK_VERSION: "0.4.40"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook
+        run: |
+          curl -fsSL --retry 3 \
+            "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /usr/local/bin mdbook
+          mdbook --version
+
+      - name: Build
+        run: mdbook build docs/book
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/book/book
+
+  deploy:
+    name: Deploy to Pages
+    runs-on: ubuntu-latest
+    needs: build
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

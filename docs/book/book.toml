@@ -1,0 +1,19 @@
+[book]
+title = "Facegate"
+description = "Face authentication for Linux — documentation"
+authors = ["Facegate contributors"]
+language = "en"
+multilingual = false
+src = "src"
+
+[output.html]
+default-theme = "ayu"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/me02329/facegate"
+edit-url-template = "https://github.com/me02329/facegate/edit/master/docs/book/{path}"
+site-url = "/facegate/"
+
+[output.html.search]
+enable = true
+limit-results = 20
+use-boolean-and = true
