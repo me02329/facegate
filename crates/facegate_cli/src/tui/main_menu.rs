@@ -1564,12 +1564,7 @@ fn render_panel(f: &mut Frame, area: Rect, app: &App) {
                 status_row("RGB camera", s.rgb_present, "present", "missing"),
             ];
             if s.ir_configured {
-                lines.push(status_row(
-                    "IR camera",
-                    s.ir_present,
-                    "present",
-                    "missing",
-                ));
+                lines.push(status_row("IR camera", s.ir_present, "present", "missing"));
             } else {
                 lines.push(Line::from(vec![
                     Span::raw("  "),
@@ -1584,10 +1579,7 @@ fn render_panel(f: &mut Frame, area: Rect, app: &App) {
                         format!("{:<14}", "IR camera"),
                         Style::default().fg(Color::DarkGray),
                     ),
-                    Span::styled(
-                        "not configured",
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::styled("not configured", Style::default().fg(Color::DarkGray)),
                 ]));
             }
             lines.push(audit_row(s.last_audit.as_ref()));
@@ -2476,10 +2468,7 @@ fn status_row(label: &str, ok: bool, ok_text: &str, ko_text: &str) -> Line<'stat
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(
-            format!("{label:<14}"),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(format!("{label:<14}"), Style::default().fg(Color::DarkGray)),
         Span::styled(value.to_string(), Style::default().fg(color)),
     ])
 }
