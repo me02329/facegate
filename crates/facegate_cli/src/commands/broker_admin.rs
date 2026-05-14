@@ -197,8 +197,8 @@ pub fn status_streaming(config: &Config, tx: &Sender<String>) -> anyhow::Result<
             audit_log.display()
         ),
     }
-    describe_path("users dir", &config.storage.base_dir, &tx);
-    describe_path("socket", Path::new(DEFAULT_SOCKET_PATH), &tx);
+    describe_path("users dir", &config.storage.base_dir, tx);
+    describe_path("socket", Path::new(DEFAULT_SOCKET_PATH), tx);
     Ok(())
 }
 
@@ -343,7 +343,7 @@ fn set_owner_mode(path: &Path, uid: u32, gid: u32, mode: u32) -> anyhow::Result<
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
     let rc = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
     if rc != 0 {
-        return Err(std::io::Error::last_os_error()).map_err(Into::into);
+        return Err(Into::into(std::io::Error::last_os_error()));
     }
     fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
     Ok(())
