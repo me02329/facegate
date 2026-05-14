@@ -66,12 +66,34 @@ enum Action {
     Test,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum ItemKind {
+    /// Selectable action.
+    Action,
+    /// Selectable quit item.
+    Quit,
+    /// Group header — not selectable, rendered as "── Title ──".
+    Section,
+}
+
 struct MenuItem {
     icon: &'static str,
     label: &'static str,
     description: String,
     action: Option<Action>,
     needs_user: bool,
+    kind: ItemKind,
+}
+
+fn section(title: &'static str) -> MenuItem {
+    MenuItem {
+        icon: "",
+        label: title,
+        description: String::new(),
+        action: None,
+        needs_user: false,
+        kind: ItemKind::Section,
+    }
 }
 
 fn build_items(sudo_enabled: bool, session_enabled: bool, watch_active: bool) -> Vec<MenuItem> {
@@ -106,12 +128,14 @@ fn build_items(sudo_enabled: bool, session_enabled: bool, watch_active: bool) ->
         "○ Stopped — enable auto-unlock (Windows Hello style)"
     };
     vec![
+        section("Authentication"),
         MenuItem {
             icon: "+ ",
             label: "Enroll",
             description: "Register a user's face for authentication".into(),
             action: Some(Action::Enroll),
             needs_user: true,
+            kind: ItemKind::Action,
         },
         MenuItem {
             icon: "⊞ ",
@@ -119,6 +143,7 @@ fn build_items(sudo_enabled: bool, session_enabled: bool, watch_active: bool) ->
             description: sudo_desc.into(),
             action: Some(Action::SudoToggle),
             needs_user: false,
+            kind: ItemKind::Action,
         },
         MenuItem {
             icon: "▣ ",
@@ -126,6 +151,7 @@ fn build_items(sudo_enabled: bool, session_enabled: bool, watch_active: bool) ->
             description: session_desc.into(),
             action: Some(Action::SessionToggle),
             needs_user: false,
+            kind: ItemKind::Action,
         },
         MenuItem {
             icon: "◎ ",
@@ -133,13 +159,16 @@ fn build_items(sudo_enabled: bool, session_enabled: bool, watch_active: bool) ->
             description: watch_desc.into(),
             action: Some(Action::WatchToggle),
             needs_user: false,
+            kind: ItemKind::Action,
         },
+        section("Templates"),
         MenuItem {
             icon: "= ",
             label: "Templates",
             description: "Browse & delete enrolled face templates".into(),
             action: Some(Action::List),
             needs_user: true,
+            kind: ItemKind::Action,
         },
         MenuItem {
             icon: "~ ",
@@ -147,13 +176,16 @@ fn build_items(sudo_enabled: bool, session_enabled: bool, watch_active: bool) ->
             description: "Live match test for a user         (root)".into(),
             action: Some(Action::Test),
             needs_user: true,
+            kind: ItemKind::Action,
         },
+        section("Hardware"),
         MenuItem {
             icon: "▤ ",
             label: "List Cameras",
             description: "Detect /dev/video* devices and recommend an IR cam".into(),
             action: Some(Action::Cameras),
             needs_user: false,
+            kind: ItemKind::Action,
         },
         MenuItem {
             icon: "◉ ",
@@ -161,13 +193,16 @@ fn build_items(sudo_enabled: bool, session_enabled: bool, watch_active: bool) ->
             description: "Live capture + face detection on the configured camera".into(),
             action: Some(Action::CameraTest),
             needs_user: false,
+            kind: ItemKind::Action,
         },
+        section("System"),
         MenuItem {
             icon: "✓ ",
             label: "Doctor",
             description: "Verify libs, PAM config & model files".into(),
             action: Some(Action::Doctor),
             needs_user: false,
+            kind: ItemKind::Action,
         },
         MenuItem {
             icon: "⚙ ",
@@ -175,20 +210,16 @@ fn build_items(sudo_enabled: bool, session_enabled: bool, watch_active: bool) ->
             description: "Edit thresholds, camera & model settings".into(),
             action: Some(Action::Configure),
             needs_user: false,
+            kind: ItemKind::Action,
         },
-        MenuItem {
-            icon: "  ",
-            label: "---",
-            description: "".into(),
-            action: None,
-            needs_user: false,
-        },
+        section("Exit"),
         MenuItem {
             icon: "x ",
             label: "Quit",
             description: "Exit Facegate".into(),
             action: None,
             needs_user: false,
+            kind: ItemKind::Quit,
         },
     ]
 }
@@ -271,11 +302,18 @@ impl<'a> App<'a> {
         let sudo_enabled = commands::sudo_toggle::is_enabled();
         let session_enabled = commands::session_toggle::is_enabled();
         let watch_active = commands::watch_toggle::is_active();
+        let items = build_items(sudo_enabled, session_enabled, watch_active);
+        // First section header sits at index 0; start the cursor on the first
+        // selectable action after it.
+        let selected = items
+            .iter()
+            .position(|item| item.kind != ItemKind::Section)
+            .unwrap_or(0);
         App {
             config,
             config_path: config_path.to_path_buf(),
-            items: build_items(sudo_enabled, session_enabled, watch_active),
-            selected: 0,
+            items,
+            selected,
             input_mode: InputMode::Menu,
             username_buf: String::new(),
             sample_count_buf: String::new(),
@@ -299,11 +337,11 @@ impl<'a> App<'a> {
         }
     }
 
-    fn is_sep(&self, i: usize) -> bool {
-        self.items[i].label == "---"
+    fn is_section(&self, i: usize) -> bool {
+        self.items[i].kind == ItemKind::Section
     }
     fn is_quit(&self, i: usize) -> bool {
-        self.items[i].label == "Quit"
+        self.items[i].kind == ItemKind::Quit
     }
 
     fn move_up(&mut self) {
@@ -313,7 +351,7 @@ impl<'a> App<'a> {
             } else {
                 self.selected - 1
             };
-            if !self.is_sep(self.selected) {
+            if !self.is_section(self.selected) {
                 break;
             }
         }
@@ -321,7 +359,7 @@ impl<'a> App<'a> {
     fn move_down(&mut self) {
         loop {
             self.selected = (self.selected + 1) % self.items.len();
-            if !self.is_sep(self.selected) {
+            if !self.is_section(self.selected) {
                 break;
             }
         }
@@ -719,6 +757,15 @@ impl<'a> App<'a> {
             self.session_enabled = commands::session_toggle::is_enabled();
             self.watch_active = commands::watch_toggle::is_active();
             self.items = build_items(self.sudo_enabled, self.session_enabled, self.watch_active);
+            // The toggle items may have shifted; snap the cursor to a valid
+            // selectable entry instead of trusting the stored index.
+            if self.selected >= self.items.len() || self.is_section(self.selected) {
+                self.selected = self
+                    .items
+                    .iter()
+                    .position(|item| item.kind != ItemKind::Section)
+                    .unwrap_or(0);
+            }
             self.panel = PanelState::Idle;
         }
     }
@@ -857,15 +904,18 @@ fn handle_key(app: &mut App, code: KeyCode) {
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 const LOGO: &[&str] = &[
-    " ┏━╸┏━┓┏━╸┏━╸┏━╸┏━┓╺┳╸┏━╸",
-    " ┣╸ ┣━┫┃  ┣╸ ┃╺┓┣━┫ ┃ ┣╸ ",
-    " ╹  ╹ ╹┗━╸┗━╸┗━┛╹ ╹ ╹ ┗━╸",
+    " ███████╗ █████╗  ██████╗███████╗ ██████╗  █████╗ ████████╗███████╗",
+    " ██╔════╝██╔══██╗██╔════╝██╔════╝██╔════╝ ██╔══██╗╚══██╔══╝██╔════╝",
+    " █████╗  ███████║██║     █████╗  ██║  ███╗███████║   ██║   █████╗  ",
+    " ██╔══╝  ██╔══██║██║     ██╔══╝  ██║   ██║██╔══██║   ██║   ██╔══╝  ",
+    " ██║     ██║  ██║╚██████╗███████╗╚██████╔╝██║  ██║   ██║   ███████╗",
+    " ╚═╝     ╚═╝  ╚═╝ ╚═════╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝",
 ];
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 fn render(f: &mut Frame, app: &App) {
     let root = Layout::vertical([
-        Constraint::Length(6),
+        Constraint::Length(9),
         Constraint::Min(5),
         Constraint::Length(3),
     ])
@@ -939,10 +989,26 @@ fn render_menu(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, item)| {
-            if item.label == "---" {
+            if item.kind == ItemKind::Section {
+                // "── Section Title ──" rendered in DarkGray bold so it
+                // separates groups visibly without competing with the
+                // selectable rows.
+                let title_len = item.label.chars().count();
+                let total = 22u16; // overall section-line width inside the panel
+                let pad = (total as usize).saturating_sub(title_len + 2);
+                let left = pad / 2;
+                let right = pad - left;
+                let line = format!(
+                    "  {} {} {}",
+                    "─".repeat(left.max(1)),
+                    item.label,
+                    "─".repeat(right.max(1)),
+                );
                 return ListItem::new(Line::from(Span::styled(
-                    "  ──────────────────────",
-                    Style::default().fg(Color::DarkGray),
+                    line,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
                 )));
             }
             let sel = i == app.selected && panel_active;
@@ -997,7 +1063,7 @@ fn render_panel(f: &mut Frame, area: Rect, app: &App) {
                 )),
                 Line::from(""),
             ];
-            if sel.label == "---" || sel.description.is_empty() {
+            if sel.kind == ItemKind::Section || sel.description.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "  Select an action from the menu.",
                     Style::default().fg(Color::DarkGray),
