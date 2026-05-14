@@ -43,7 +43,7 @@ Facegate lets you authenticate with your face for `sudo`, login sessions, and sc
 
 
 ---
-<img width="1615" height="970" alt="image" src="https://github.com/user-attachments/assets/6f40bec9-b786-41cf-8805-edf4e9a01a1f" />
+![Facegate TUI — main menu](images/tui.png)
 
 ---
 
