@@ -355,6 +355,7 @@ systemctl --user enable --now facegate-watch
 | `add USERNAME [--label LABEL] [--for sudo\|session\|both]` | Enroll face templates |
 | `list USERNAME` | List enrolled templates (via the broker) |
 | `remove USERNAME ID` | Remove a template by ID (via the broker) |
+| `forget USERNAME [--yes]` | Remove every enrolled template for a user (confirmation by default) |
 | `test USERNAME [--for sudo\|session\|all]` | Live recognition test |
 | `calibrate USERNAME [--for sudo\|session] [--samples N] [--write]` | Recommend a recognition threshold from live positive samples; `--write` offers to save it to the config |
 | `calibrate-cameras [--rgb-device DEV] [--ir-device DEV] [--samples N] [--write] [--enable]` | Estimate the IR→RGB homography for dual-stream cross-check |

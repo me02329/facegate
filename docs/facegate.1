@@ -58,6 +58,12 @@ facegate \- native facial authentication for Linux, including automatic screen u
 .I ID
 .YS
 .SY facegate
+.B forget
+.RI [ --config " PATH" ]
+.RI [ -y " | " --yes ]
+.I USERNAME
+.YS
+.SY facegate
 .B test
 .RI [ --config " PATH" ]
 .I USERNAME
@@ -279,6 +285,16 @@ including IDs, scopes, creation timestamps, and labels.
 .TP
 .B remove \fIUSERNAME\fR \fIID\fR
 Remove one enrolled template by ID. Requires root.
+.TP
+.B forget \fIUSERNAME\fR [\fB-y\fR | \fB--yes\fR]
+Remove every enrolled template for
+.IR USERNAME
+in one operation. Lists the templates that will be deleted and asks for
+confirmation by default; pass
+.B --yes
+to skip the prompt (useful for scripted resets during testing). Each
+removal goes through the broker so the audit log records the action.
+Requires root.
 .TP
 .B test \fIUSERNAME\fR
 Capture a live face embedding and compare it against all enrolled templates for
