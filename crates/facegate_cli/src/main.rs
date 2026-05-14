@@ -66,6 +66,13 @@ enum Command {
     List { username: String },
     /// Remove an enrolled template (requires root)
     Remove { username: String, id: u32 },
+    /// Remove ALL enrolled templates for a user (requires root)
+    Forget {
+        username: String,
+        /// Skip the confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
     /// Live test authentication for a user (requires root)
     Test {
         username: String,
@@ -326,6 +333,7 @@ fn run_command(
         }
         Command::List { username } => commands::list::run(&config, &username),
         Command::Remove { username, id } => commands::remove::run(&config, &username, id),
+        Command::Forget { username, yes } => commands::forget::run(&config, &username, yes),
         Command::Test { username, purpose } => {
             commands::test::run(&config, &username, purpose.into())
         }

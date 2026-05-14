@@ -48,6 +48,8 @@ emergency PAM rollback, liveness PAD groundwork) are still open.
   `width`, `height`, `fps`, `timeout_ms`, `warmup_frames`, and
   `min_face_size`, all optional with IR-friendly defaults (longer
   warmup/timeout, 5/8× the RGB min face size).
+- `facegate forget <username> [--yes]` removes every enrolled template
+  for a user in one go, with confirmation prompt by default.
 - Per-user diagnostic log at `~/.local/state/facegate/facegate.log`, plus
   `facegate logs`, to help users debug camera failures, timeouts,
   cross-check rejects, broker errors, and accept/reject outcomes without
@@ -107,6 +109,16 @@ emergency PAM rollback, liveness PAD groundwork) are still open.
   replaced by a dedicated `[camera.ir]` section. Cross-check enabled with
   the identity homography is refused at config validation unless
   `camera.cross_check.allow_identity_homography = true` (#28).
+- **Default `max_time_skew_ms` bumped 50 → 200 ms.** The 50 ms window
+  was too tight for typical Chicony/Realtek IR modules, whose first
+  frame after `STREAMON` is regularly 80–150 ms slower than the RGB
+  one. 200 ms keeps the window short enough to bound replay risk
+  while letting honest dual-camera captures through on the first
+  attempt (#28).
+- `install-dev.sh` next-steps message now points operators at
+  `sudo facegate setup` (which picks RGB as primary and offers
+  cross-check + calibration inline) instead of telling them to prefer
+  the IR device as the primary camera (which broke validation).
 
 ### Fixed
 

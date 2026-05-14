@@ -152,7 +152,12 @@ fn default_cooldown_seconds() -> u64 {
 }
 
 fn default_cross_check_max_time_skew_ms() -> u64 {
-    50
+    // 50 ms was too aggressive on real hardware: the IR sensor frequently
+    // takes 80–150 ms to deliver its first frame after STREAMON, especially
+    // on Chicony 04f2:b829 and similar Windows-Hello modules. 200 ms keeps
+    // the window tight enough to bound replay risk while letting honest
+    // dual-camera captures through on the first attempt.
+    200
 }
 
 fn default_cross_check_max_position_offset_px() -> f32 {

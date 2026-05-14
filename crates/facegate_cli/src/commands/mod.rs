@@ -7,6 +7,7 @@ pub mod camera_test;
 pub mod cameras;
 pub mod configure;
 pub mod doctor;
+pub mod forget;
 pub mod list;
 pub mod pam_edit;
 pub mod remove;
