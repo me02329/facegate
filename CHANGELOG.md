@@ -86,9 +86,20 @@ security disclosure documentation set
   `calibrate --write`, and `calibrate-cameras --write` now start/restart
   `facegate-brokerd.service` and restart the user's `facegate-watch`
   service if it is active, so config changes apply immediately.
+- TUI idle pane now shows a live system status block — broker socket
+  reachability, watch service activity, sudo PAM, session PAM — pushed
+  every 1.5 s by a background probe thread so the indicators refresh
+  without user input. Long command output (logs, status, audit
+  entries) now wraps inside the right pane instead of clipping past
+  the border (#47).
 
 ### Changed
 
+- `facegate status` from the TUI now matches the CLI output: the
+  camera, models, templates, and audit sections were previously only
+  printed by the CLI variant. Audit event lines also use lower-case
+  scope / outcome / reason labels instead of the Rust `Debug`
+  representation (#47).
 - **Package postinstall hardened** (`packaging/nfpm/scripts/postinstall.sh`):
   `set -euo pipefail` + `umask 077` at the top; `/var/lib/facegate/audit.log`
   is created atomically via `install(1)` so there is no

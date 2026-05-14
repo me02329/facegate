@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame, Terminal,
 };
 use std::{io, time::Duration};
@@ -358,6 +358,28 @@ enum InputMode {
     BrokerRepairConfirm,
 }
 
+/// Snapshot of system state that refreshes in the background while the TUI
+/// is idle.  Cheap probes only — anything that shells out (`systemctl`) runs
+/// on a worker thread so the UI never blocks.
+#[derive(Clone, Default)]
+struct LiveStatus {
+    broker_socket: bool,
+    watch_active: bool,
+    sudo_pam: bool,
+    session_pam: bool,
+}
+
+impl LiveStatus {
+    fn probe() -> Self {
+        Self {
+            broker_socket: std::path::Path::new("/run/facegate/broker.sock").exists(),
+            watch_active: commands::watch_toggle::is_active(),
+            sudo_pam: commands::sudo_toggle::is_enabled(),
+            session_pam: commands::session_toggle::is_enabled(),
+        }
+    }
+}
+
 enum PanelState {
     /// Idle — show welcome text.
     Idle,
@@ -401,6 +423,9 @@ struct App<'a> {
     sudo_enabled: bool,
     session_enabled: bool,
     watch_active: bool,
+    /// Latest snapshot pushed by the background probe thread.
+    live_rx: Receiver<LiveStatus>,
+    live_status: LiveStatus,
     /// When set, the loop exits and main re-opens the config TUI.
     open_config: bool,
     should_quit: bool,
@@ -412,6 +437,19 @@ impl<'a> App<'a> {
         let session_enabled = commands::session_toggle::is_enabled();
         let watch_active = commands::watch_toggle::is_active();
         let items = build_items(sudo_enabled, session_enabled, watch_active);
+        let initial = LiveStatus {
+            broker_socket: std::path::Path::new("/run/facegate/broker.sock").exists(),
+            watch_active,
+            sudo_pam: sudo_enabled,
+            session_pam: session_enabled,
+        };
+        let (live_tx, live_rx) = mpsc::channel::<LiveStatus>();
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(1500));
+            if live_tx.send(LiveStatus::probe()).is_err() {
+                return;
+            }
+        });
         // First section header sits at index 0; start the cursor on the first
         // selectable action after it.
         let selected = items
@@ -444,6 +482,8 @@ impl<'a> App<'a> {
             sudo_enabled,
             session_enabled,
             watch_active,
+            live_rx,
+            live_status: initial,
             open_config: false,
             should_quit: false,
         }
@@ -964,6 +1004,10 @@ impl<'a> App<'a> {
 
     /// Drain the channel. Returns true if we transitioned to Done.
     fn poll_channel(&mut self) {
+        // Drain any background live-status snapshots; keep the most recent.
+        while let Ok(snap) = self.live_rx.try_recv() {
+            self.live_status = snap;
+        }
         if let PanelState::Running { rx, lines, tick } = &mut self.panel {
             *tick = tick.wrapping_add(1);
             loop {
@@ -1447,7 +1491,20 @@ fn render_panel(f: &mut Frame, area: Rect, app: &App) {
     let (title, border_color, content_lines, hint) = match &app.panel {
         PanelState::Idle => {
             let sel = &app.items[app.selected];
+            let s = &app.live_status;
             let mut lines = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  System status",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                status_row("Broker socket", s.broker_socket, "reachable", "down"),
+                status_row("Watch service", s.watch_active, "active", "inactive"),
+                status_row("Sudo PAM", s.sudo_pam, "enabled", "disabled"),
+                status_row("Session PAM", s.session_pam, "enabled", "disabled"),
                 Line::from(""),
                 Line::from(Span::styled(
                     format!("  {}{}", sel.icon, sel.label),
@@ -1544,7 +1601,10 @@ fn render_panel(f: &mut Frame, area: Rect, app: &App) {
 
     let inner = block.inner(inner_layout[0]);
     f.render_widget(block, inner_layout[0]);
-    f.render_widget(Paragraph::new(content_lines), inner);
+    f.render_widget(
+        Paragraph::new(content_lines).wrap(Wrap { trim: false }),
+        inner,
+    );
 
     if let Some(hint_line) = hint {
         f.render_widget(
@@ -2215,6 +2275,27 @@ fn render_pam_service_popup(f: &mut Frame, app: &App) {
         .style(Style::default().fg(Color::DarkGray)),
         layout[5],
     );
+}
+
+fn status_row(label: &str, ok: bool, ok_text: &str, ko_text: &str) -> Line<'static> {
+    let (dot, color, value) = if ok {
+        ("●", Color::Green, ok_text)
+    } else {
+        ("○", Color::Red, ko_text)
+    };
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            dot.to_string(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{label:<14}"),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(value.to_string(), Style::default().fg(color)),
+    ])
 }
 
 fn centered_rect(px: u16, py: u16, r: Rect) -> Rect {

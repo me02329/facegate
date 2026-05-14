@@ -1,40 +1,83 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Sender};
 
 use facegate_core::config::Config;
 use facegate_core::storage::AuthScope;
-use facegate_ipc::{Request, RequestEnvelope, Response, DEFAULT_SOCKET_PATH};
 use v4l::video::Capture;
 use v4l::Device;
 
 use crate::commands::{broker, session_toggle, sudo_toggle, watch_toggle};
 
 pub fn run(config: &Config, config_path: &Path) -> anyhow::Result<()> {
-    println!("Facegate status\n");
-
-    print_config(config, config_path);
-    print_broker();
-    print_camera(config);
-    print_models(config);
-    print_templates(config);
-    print_audit();
-    print_auth();
-    print_watch();
-
-    Ok(())
+    let (tx, rx) = mpsc::channel::<String>();
+    let config = config.clone();
+    let config_path = config_path.to_path_buf();
+    let handle = std::thread::spawn(move || {
+        let result = run_streaming(&config, &config_path, &tx);
+        drop(tx);
+        result
+    });
+    while let Ok(line) = rx.recv() {
+        println!("{line}");
+    }
+    handle.join().unwrap()
 }
 
 pub fn run_streaming(
     config: &Config,
     config_path: &Path,
-    tx: &std::sync::mpsc::Sender<String>,
+    tx: &Sender<String>,
 ) -> anyhow::Result<()> {
+    let _ = tx.send("Facegate status".to_owned());
+    let _ = tx.send(String::new());
+    emit_config(config, config_path, tx);
+    let _ = tx.send(String::new());
+    crate::commands::broker_admin::status_streaming(config, tx)?;
+    let _ = tx.send(String::new());
+    emit_camera(config, tx);
+    let _ = tx.send(String::new());
+    emit_models(config, tx);
+    let _ = tx.send(String::new());
+    emit_templates(config, tx);
+    let _ = tx.send(String::new());
+    emit_audit(tx);
+    let _ = tx.send(String::new());
+    emit_auth(tx);
+    let _ = tx.send(String::new());
+    emit_watch(tx);
+    Ok(())
+}
+
+fn emit_audit(tx: &Sender<String>) {
     macro_rules! out {
         ($($arg:tt)*) => {{ let _ = tx.send(format!($($arg)*)); }};
     }
+    out!("Audit");
+    let username = current_username();
+    match broker::audit_recent(username, 5) {
+        Ok(events) if events.is_empty() => out!("  recent : none"),
+        Ok(events) => {
+            out!("  recent :");
+            for event in events {
+                out!(
+                    "           - {} user={} scope={} outcome={} reason={}",
+                    event.timestamp_unix,
+                    event.username,
+                    audit_scope_label(&event.auth_scope),
+                    audit_outcome_label(&event.outcome),
+                    audit_reason_label(&event.reason),
+                );
+            }
+        }
+        Err(e) => out!("  recent : unavailable ({e})"),
+    }
+}
 
-    out!("Facegate status");
-    out!("");
+fn emit_config(config: &Config, config_path: &Path, tx: &Sender<String>) {
+    macro_rules! out {
+        ($($arg:tt)*) => {{ let _ = tx.send(format!($($arg)*)); }};
+    }
     out!("Config");
     out!("  path   : {}", config_path.display());
     out!(
@@ -45,96 +88,16 @@ pub fn run_streaming(
         }
     );
     out!("  storage: {}", config.storage.base_dir.display());
-    out!("");
-    crate::commands::broker_admin::status_streaming(config, tx)?;
-    out!("");
-    out!("Auth");
-    out!(
-        "  sudo   : {}",
-        if sudo_toggle::is_enabled() {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
-    out!(
-        "  session: {}",
-        if session_toggle::is_enabled() {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
-    out!(
-        "  watch  : {}",
-        if watch_toggle::is_active() {
-            "running"
-        } else {
-            "stopped"
-        }
-    );
-    Ok(())
 }
 
-fn print_audit() {
-    println!("Audit");
-    let username = current_username();
-    match broker::audit_recent(username, 5) {
-        Ok(events) if events.is_empty() => println!("  recent : none"),
-        Ok(events) => {
-            println!("  recent :");
-            for event in events {
-                println!(
-                    "           - {} user={} scope={:?} outcome={:?} reason={:?}",
-                    event.timestamp_unix,
-                    event.username,
-                    event.auth_scope,
-                    event.outcome,
-                    event.reason
-                );
-            }
-        }
-        Err(e) => println!("  recent : unavailable ({e})"),
+fn emit_camera(config: &Config, tx: &Sender<String>) {
+    macro_rules! out {
+        ($($arg:tt)*) => {{ let _ = tx.send(format!($($arg)*)); }};
     }
-    println!();
-}
-
-fn print_config(config: &Config, config_path: &Path) {
-    println!("Config");
-    println!("  path   : {}", config_path.display());
-    match Config::load(config_path) {
-        Ok(_) => println!("  parse  : ok"),
-        Err(e) => println!("  parse  : error ({e})"),
-    }
-    println!("  storage: {}", config.storage.base_dir.display());
-    println!();
-}
-
-fn print_broker() {
-    println!("Broker");
-    match facegate_ipc::send_request(DEFAULT_SOCKET_PATH, RequestEnvelope::new(Request::Health)) {
-        Ok(response) => match response.response {
-            Response::Health { info } => {
-                println!(
-                    "  socket : ok ({DEFAULT_SOCKET_PATH}, protocol {}, broker {})",
-                    info.protocol_version, info.broker_version
-                );
-            }
-            Response::Error(error) => {
-                println!("  socket : error ({:?}: {})", error.code, error.message);
-            }
-            other => println!("  socket : unexpected response ({other:?})"),
-        },
-        Err(e) => println!("  socket : unavailable ({e})"),
-    }
-    println!();
-}
-
-fn print_camera(config: &Config) {
-    println!("Camera");
+    out!("Camera");
     let path = Path::new(&config.camera.device);
-    println!("  rgb    : {}", config.camera.device);
-    println!(
+    out!("  rgb    : {}", config.camera.device);
+    out!(
         "           exists={} kind={}",
         yes_no(path.exists()),
         camera_kind(path)
@@ -142,16 +105,16 @@ fn print_camera(config: &Config) {
     match config.camera.ir.as_ref() {
         Some(ir) => {
             let ir_path = Path::new(&ir.device);
-            println!("  ir     : {}", ir.device);
-            println!(
+            out!("  ir     : {}", ir.device);
+            out!(
                 "           exists={} kind={}",
                 yes_no(ir_path.exists()),
                 camera_kind(ir_path)
             );
         }
-        None => println!("  ir     : not configured"),
+        None => out!("  ir     : not configured"),
     }
-    println!(
+    out!(
         "  check  : {}",
         if config.camera.cross_check.enabled {
             "RGB+IR required"
@@ -159,7 +122,6 @@ fn print_camera(config: &Config) {
             "single camera"
         }
     );
-    println!();
 }
 
 fn camera_kind(path: &Path) -> &'static str {
@@ -182,37 +144,39 @@ fn camera_kind(path: &Path) -> &'static str {
     }
 }
 
-fn print_models(config: &Config) {
-    println!("Models");
-    println!(
+fn emit_models(config: &Config, tx: &Sender<String>) {
+    macro_rules! out {
+        ($($arg:tt)*) => {{ let _ = tx.send(format!($($arg)*)); }};
+    }
+    out!("Models");
+    out!(
         "  detector: {} ({})",
         config.models.detector.display(),
         exists_label(&config.models.detector)
     );
-    println!(
+    out!(
         "  embedder: {} ({})",
         config.models.embedder.display(),
         exists_label(&config.models.embedder)
     );
-    println!();
 }
 
-fn print_templates(config: &Config) {
-    println!("Templates");
+fn emit_templates(config: &Config, tx: &Sender<String>) {
+    macro_rules! out {
+        ($($arg:tt)*) => {{ let _ = tx.send(format!($($arg)*)); }};
+    }
+    out!("Templates");
     let users = visible_template_users(config);
     if users.is_empty() {
-        println!("  users  : permission-limited or none found");
+        out!("  users  : permission-limited or none found");
         if let Some(user) = current_username() {
-            print_user_templates(&user);
+            emit_user_templates(&user, tx);
         }
-        println!();
         return;
     }
-
     for user in users {
-        print_user_templates(&user);
+        emit_user_templates(&user, tx);
     }
-    println!();
 }
 
 fn visible_template_users(config: &Config) -> Vec<String> {
@@ -236,11 +200,12 @@ fn visible_template_users(config: &Config) -> Vec<String> {
     users
 }
 
-fn print_user_templates(username: &str) {
+fn emit_user_templates(username: &str, tx: &Sender<String>) {
+    macro_rules! out {
+        ($($arg:tt)*) => {{ let _ = tx.send(format!($($arg)*)); }};
+    }
     match broker::list_templates(username) {
-        Ok(templates) if templates.is_empty() => {
-            println!("  {username}: none");
-        }
+        Ok(templates) if templates.is_empty() => out!("  {username}: none"),
         Ok(templates) => {
             let sudo = templates
                 .iter()
@@ -250,35 +215,38 @@ fn print_user_templates(username: &str) {
                 .iter()
                 .filter(|template| broker::summary_allows(template, AuthScope::Session))
                 .count();
-            println!(
+            out!(
                 "  {username}: {} total (sudo: {sudo}, session: {session})",
                 templates.len()
             );
         }
-        Err(e) => {
-            println!("  {username}: permission-limited ({e})");
-        }
+        Err(e) => out!("  {username}: permission-limited ({e})"),
     }
 }
 
-fn print_auth() {
-    println!("PAM");
-    println!("  sudo  : {}", enabled_label(sudo_toggle::is_enabled()));
+fn emit_auth(tx: &Sender<String>) {
+    macro_rules! out {
+        ($($arg:tt)*) => {{ let _ = tx.send(format!($($arg)*)); }};
+    }
+    out!("PAM");
+    out!("  sudo  : {}", enabled_label(sudo_toggle::is_enabled()));
     let session_entries = session_toggle::enabled_service_entries();
     if session_entries.is_empty() {
-        println!("  session: disabled");
+        out!("  session: disabled");
     } else {
-        println!("  session: enabled");
+        out!("  session: enabled");
         for (name, service, path) in session_entries {
-            println!("           - {name} ({service}): {path}");
+            out!("           - {name} ({service}): {path}");
         }
     }
-    println!();
 }
 
-fn print_watch() {
-    println!("Watch daemon");
-    println!(
+fn emit_watch(tx: &Sender<String>) {
+    macro_rules! out {
+        ($($arg:tt)*) => {{ let _ = tx.send(format!($($arg)*)); }};
+    }
+    out!("Watch daemon");
+    out!(
         "  unit   : {}",
         if watch_toggle::is_installed() {
             "installed"
@@ -287,12 +255,38 @@ fn print_watch() {
         }
     );
     match systemctl_user(["is-enabled", "facegate-watch"]) {
-        Some(output) => println!("  enabled: {}", output.trim()),
-        None => println!("  enabled: unavailable"),
+        Some(output) => out!("  enabled: {}", output.trim()),
+        None => out!("  enabled: unavailable"),
     }
     match systemctl_user(["is-active", "facegate-watch"]) {
-        Some(output) => println!("  active : {}", output.trim()),
-        None => println!("  active : unavailable"),
+        Some(output) => out!("  active : {}", output.trim()),
+        None => out!("  active : unavailable"),
+    }
+}
+
+fn audit_scope_label(scope: &facegate_ipc::AuthScope) -> &'static str {
+    match scope {
+        facegate_ipc::AuthScope::Sudo => "sudo",
+        facegate_ipc::AuthScope::Session => "session",
+    }
+}
+
+fn audit_outcome_label(outcome: &facegate_ipc::AuditOutcome) -> &'static str {
+    match outcome {
+        facegate_ipc::AuditOutcome::Success => "success",
+        facegate_ipc::AuditOutcome::Failure => "failure",
+    }
+}
+
+fn audit_reason_label(reason: &facegate_ipc::AuditReason) -> &'static str {
+    match reason {
+        facegate_ipc::AuditReason::Matched => "matched",
+        facegate_ipc::AuditReason::Mismatch => "mismatch",
+        facegate_ipc::AuditReason::NotEnrolled => "not_enrolled",
+        facegate_ipc::AuditReason::RateLimited => "rate_limited",
+        facegate_ipc::AuditReason::LockedOut => "locked_out",
+        facegate_ipc::AuditReason::Unauthorized => "unauthorized",
+        facegate_ipc::AuditReason::Internal => "internal",
     }
 }
 
