@@ -19,6 +19,9 @@
 /.tmp/
 facegate-*.tmp
 
+# mdBook output (built by .github/workflows/pages.yml in CI)
+/docs/book/book/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db
