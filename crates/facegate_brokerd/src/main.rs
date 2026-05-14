@@ -1,23 +1,26 @@
 use std::ffi::CString;
 use std::fs;
 use std::io::{BufRead, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use facegate_core::camera::Frame;
-use facegate_core::config::{Config, ModelsConfig, DEFAULT_CONFIG_PATH};
-use facegate_core::detection::ScrfdDetector;
+use facegate_core::config::{
+    CameraConfig, Config, EffectiveRecognitionPolicy, ModelsConfig, DEFAULT_CONFIG_PATH,
+};
+use facegate_core::detection::{Detection, ScrfdDetector};
 use facegate_core::embedding::ArcFaceEmbedder;
 use facegate_core::error::FaceRsError;
 use facegate_core::matching::cosine_similarity;
 use facegate_core::storage::{AuthScope, TemplateScope, TemplateStore};
 use facegate_ipc::{
     encode_response, AuditEvent, AuditOutcome, AuditReason, BrokerInfo, EnrolledTemplateSummary,
-    ErrorCode, FrameFormat, FrameProbe, MatchResult, Request, RequestEnvelope, Response,
-    ResponseEnvelope, MAX_REQUEST_BYTES, PROTOCOL_VERSION,
+    EnrolledUserSummary, ErrorCode, FrameFormat, FrameProbe, MatchReason, MatchResult,
+    OwnershipSummary, Request, RequestEnvelope, Response, ResponseEnvelope, MAX_REQUEST_BYTES,
+    PROTOCOL_VERSION,
 };
 use std::os::unix::fs::FileTypeExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -145,10 +148,12 @@ async fn handle_client(
 struct BrokerState {
     storage_base_dir: PathBuf,
     audit_path: PathBuf,
-    threshold: f32,
+    sudo_policy: EffectiveRecognitionPolicy,
+    session_policy: EffectiveRecognitionPolicy,
     min_face_size: u32,
     cooldown_after_failures: u32,
     cooldown_duration: Duration,
+    cross_check: CrossCheckPolicy,
     abuse: Arc<Mutex<AbuseState>>,
     models: ModelsConfig,
     /// SCRFD + ArcFace, lazily loaded on first MatchFrame request. Guarded by
@@ -162,6 +167,68 @@ struct InferenceState {
     embedder: ArcFaceEmbedder,
 }
 
+struct InferenceProbe {
+    detection: Detection,
+    embedding: Vec<f32>,
+}
+
+enum InferenceDetailsResult {
+    Probe(InferenceProbe),
+    NoFace,
+    MultipleFaces,
+}
+
+enum StrictDetection {
+    Detection(Detection),
+    NoFace,
+    MultipleFaces,
+}
+
+enum StrictInferenceResult {
+    Probe(InferenceProbe),
+    Reject(StrictInferenceReject),
+}
+
+enum StrictInferenceReject {
+    NoFace,
+    MultipleFaces,
+}
+
+impl StrictInferenceReject {
+    fn rgb_match_reason(self) -> MatchReason {
+        match self {
+            Self::NoFace => MatchReason::CrossCheckRgbNoFace,
+            Self::MultipleFaces => MatchReason::CrossCheckRgbMultipleFaces,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CrossCheckPolicy {
+    required: bool,
+    max_time_skew_ms: u64,
+    max_position_offset_px: f32,
+    homography: [f32; 9],
+    ir_min_face_size: u32,
+}
+
+impl CrossCheckPolicy {
+    fn from_config(config: &CameraConfig, rgb_min_face_size: u32) -> Self {
+        let ir_min_face_size = config
+            .ir
+            .as_ref()
+            .map(|ir| ir.effective_min_face_size(rgb_min_face_size))
+            .unwrap_or(rgb_min_face_size);
+        Self {
+            required: config.cross_check.enabled && config.ir.is_some(),
+            max_time_skew_ms: config.cross_check.max_time_skew_ms,
+            max_position_offset_px: config.cross_check.max_position_offset_px,
+            homography: config.cross_check.homography,
+            ir_min_face_size,
+        }
+    }
+}
+
 impl BrokerState {
     fn from_config(config: Config) -> Self {
         let audit_path = config
@@ -173,10 +240,15 @@ impl BrokerState {
         Self {
             storage_base_dir: config.storage.base_dir,
             audit_path,
-            threshold: config.recognition.threshold,
+            sudo_policy: config.recognition.policy_for(AuthScope::Sudo),
+            session_policy: config.recognition.policy_for(AuthScope::Session),
             min_face_size: config.recognition.min_face_size,
             cooldown_after_failures: config.security.cooldown_after_failures,
             cooldown_duration: Duration::from_secs(config.security.cooldown_seconds),
+            cross_check: CrossCheckPolicy::from_config(
+                &config.camera,
+                config.recognition.min_face_size,
+            ),
             abuse: Arc::new(Mutex::new(AbuseState::default())),
             models: config.models,
             inference: Arc::new(Mutex::new(None)),
@@ -206,6 +278,7 @@ impl BrokerState {
                 },
             }),
             Request::AuditRecent { username, limit } => self.audit_recent(peer, username, limit),
+            Request::Users => self.users(peer),
             Request::Match {
                 username,
                 auth_scope,
@@ -236,6 +309,23 @@ impl BrokerState {
                 frame.bytes.zeroize();
                 response
             }
+            Request::MatchFramePair {
+                username,
+                auth_scope,
+                mut rgb_frame,
+                mut ir_frame,
+            } => {
+                let response = self.match_frame_pair(
+                    peer,
+                    &username,
+                    core_auth_scope(auth_scope),
+                    &rgb_frame,
+                    &ir_frame,
+                );
+                rgb_frame.bytes.zeroize();
+                ir_frame.bytes.zeroize();
+                response
+            }
             Request::Enroll {
                 username,
                 label,
@@ -257,6 +347,13 @@ impl BrokerState {
                 username,
                 template_id,
             } => self.remove(peer, &username, template_id),
+        }
+    }
+
+    fn policy_for(&self, auth_scope: AuthScope) -> EffectiveRecognitionPolicy {
+        match auth_scope {
+            AuthScope::Sudo => self.sudo_policy,
+            AuthScope::Session => self.session_policy,
         }
     }
 
@@ -353,7 +450,7 @@ impl BrokerState {
                 "user has no enrolled templates",
             );
         };
-        let matched = score >= self.threshold;
+        let matched = score >= self.policy_for(auth_scope).threshold;
         self.zeroize_templates(&mut templates);
         if matched {
             self.record_match_success(username);
@@ -377,6 +474,11 @@ impl BrokerState {
                 matched,
                 score: Some(score),
                 template_id: matched.then_some(template_id),
+                reason: if matched {
+                    MatchReason::Matched
+                } else {
+                    MatchReason::TemplateMismatch
+                },
             },
         })
     }
@@ -414,6 +516,14 @@ impl BrokerState {
             }
         }
 
+        if self.cross_check.required {
+            return self.cross_check_mismatch(
+                username,
+                auth_scope,
+                MatchReason::CrossCheckRequired,
+            );
+        }
+
         let mut frame = match frame_from_probe(probe) {
             Ok(frame) => frame,
             Err(err) => {
@@ -448,6 +558,7 @@ impl BrokerState {
                         matched: false,
                         score: None,
                         template_id: None,
+                        reason: MatchReason::NoFace,
                     },
                 });
             }
@@ -470,6 +581,172 @@ impl BrokerState {
         response
     }
 
+    fn match_frame_pair(
+        &self,
+        peer: Option<PeerCredentials>,
+        username: &str,
+        auth_scope: AuthScope,
+        rgb_probe: &FrameProbe,
+        ir_probe: &FrameProbe,
+    ) -> ResponseEnvelope {
+        if !self.cross_check.required {
+            return self.match_frame(peer, username, auth_scope, rgb_probe);
+        }
+        if !authorized_for_match(peer, username, auth_scope) {
+            self.write_audit(
+                username,
+                auth_scope,
+                AuditOutcome::Failure,
+                AuditReason::Unauthorized,
+            );
+            return unauthorized();
+        }
+        let Some(peer) = peer else {
+            self.write_audit(
+                username,
+                auth_scope,
+                AuditOutcome::Failure,
+                AuditReason::Unauthorized,
+            );
+            return unauthorized();
+        };
+        match self.check_match_allowed(peer, username) {
+            Ok(()) => {}
+            Err((error, reason)) => {
+                self.write_audit(username, auth_scope, AuditOutcome::Failure, reason);
+                return error;
+            }
+        }
+
+        if !frames_are_synchronized(
+            rgb_probe.captured_at_ms,
+            ir_probe.captured_at_ms,
+            self.cross_check.max_time_skew_ms,
+        ) {
+            return self.cross_check_mismatch(
+                username,
+                auth_scope,
+                MatchReason::CrossCheckTimeSkew,
+            );
+        }
+
+        let mut rgb_frame = match frame_from_probe(rgb_probe) {
+            Ok(frame) => frame,
+            Err(err) => return self.cross_check_internal(username, auth_scope, err),
+        };
+        let mut ir_frame = match frame_from_probe(ir_probe) {
+            Ok(frame) => frame,
+            Err(err) => {
+                rgb_frame.data.zeroize();
+                return self.cross_check_internal(username, auth_scope, err);
+            }
+        };
+
+        let mut rgb_probe = match self.run_inference_strict(&rgb_frame) {
+            Ok(StrictInferenceResult::Probe(probe)) => probe,
+            Ok(StrictInferenceResult::Reject(reason)) => {
+                rgb_frame.data.zeroize();
+                ir_frame.data.zeroize();
+                return self.cross_check_mismatch(username, auth_scope, reason.rgb_match_reason());
+            }
+            Err(err) => {
+                rgb_frame.data.zeroize();
+                ir_frame.data.zeroize();
+                return self.cross_check_internal(username, auth_scope, err);
+            }
+        };
+        // IR is a liveness signal, not an identity signal: we only need SCRFD
+        // to confirm exactly one face is present and where it is, so we skip
+        // ArcFace on the IR crop entirely. Running it would be a no-op
+        // anyway — the model was never trained on cross-modal RGB↔IR pairs,
+        // so any similarity it produced was noise.
+        let ir_detection =
+            match self.run_detection_strict(&ir_frame, self.cross_check.ir_min_face_size) {
+                Ok(StrictDetection::Detection(detection)) => detection,
+                Ok(StrictDetection::NoFace) => {
+                    rgb_probe.embedding.zeroize();
+                    rgb_frame.data.zeroize();
+                    ir_frame.data.zeroize();
+                    return self.cross_check_mismatch(
+                        username,
+                        auth_scope,
+                        MatchReason::CrossCheckIrNoFace,
+                    );
+                }
+                Ok(StrictDetection::MultipleFaces) => {
+                    rgb_probe.embedding.zeroize();
+                    rgb_frame.data.zeroize();
+                    ir_frame.data.zeroize();
+                    return self.cross_check_mismatch(
+                        username,
+                        auth_scope,
+                        MatchReason::CrossCheckIrMultipleFaces,
+                    );
+                }
+                Err(err) => {
+                    rgb_probe.embedding.zeroize();
+                    rgb_frame.data.zeroize();
+                    ir_frame.data.zeroize();
+                    return self.cross_check_internal(username, auth_scope, err);
+                }
+            };
+        rgb_frame.data.zeroize();
+        ir_frame.data.zeroize();
+
+        if let Err(reason) = cross_stream_position_consistency(
+            &rgb_probe.detection,
+            &ir_detection,
+            &self.cross_check.homography,
+            self.cross_check.max_position_offset_px,
+        ) {
+            rgb_probe.embedding.zeroize();
+            return self.cross_check_mismatch(username, auth_scope, reason);
+        }
+
+        let response = self.compare_embedding(username, auth_scope, &rgb_probe.embedding);
+        rgb_probe.embedding.zeroize();
+        response
+    }
+
+    fn cross_check_mismatch(
+        &self,
+        username: &str,
+        auth_scope: AuthScope,
+        reason: MatchReason,
+    ) -> ResponseEnvelope {
+        self.record_match_failure(username);
+        self.write_audit(
+            username,
+            auth_scope,
+            AuditOutcome::Failure,
+            AuditReason::Mismatch,
+        );
+        ResponseEnvelope::ok(Response::Match {
+            result: MatchResult {
+                matched: false,
+                score: None,
+                template_id: None,
+                reason,
+            },
+        })
+    }
+
+    fn cross_check_internal(
+        &self,
+        username: &str,
+        auth_scope: AuthScope,
+        err: ResponseEnvelope,
+    ) -> ResponseEnvelope {
+        self.record_match_failure(username);
+        self.write_audit(
+            username,
+            auth_scope,
+            AuditOutcome::Failure,
+            AuditReason::Internal,
+        );
+        err
+    }
+
     /// Lock the inference state, lazily loading SCRFD + ArcFace on first use,
     /// then detect+embed the largest face. Returns Ok(None) when no face is
     /// found in the frame.
@@ -477,6 +754,61 @@ impl BrokerState {
         &self,
         frame: &Frame,
     ) -> std::result::Result<Option<Vec<f32>>, ResponseEnvelope> {
+        match self.run_inference_details(frame, false)? {
+            InferenceDetailsResult::Probe(probe) => Ok(Some(probe.embedding)),
+            InferenceDetailsResult::NoFace | InferenceDetailsResult::MultipleFaces => Ok(None),
+        }
+    }
+
+    fn run_inference_strict(
+        &self,
+        frame: &Frame,
+    ) -> std::result::Result<StrictInferenceResult, ResponseEnvelope> {
+        match self.run_inference_details(frame, true)? {
+            InferenceDetailsResult::Probe(probe) => Ok(StrictInferenceResult::Probe(probe)),
+            InferenceDetailsResult::NoFace => {
+                Ok(StrictInferenceResult::Reject(StrictInferenceReject::NoFace))
+            }
+            InferenceDetailsResult::MultipleFaces => Ok(StrictInferenceResult::Reject(
+                StrictInferenceReject::MultipleFaces,
+            )),
+        }
+    }
+
+    /// Detect-only path used for the IR stream: returns the single detection
+    /// (or a NoFace / MultipleFaces reject) without running ArcFace. The IR
+    /// stream serves only as a liveness signal, so an embedding would be
+    /// unused — and meaningless across modalities anyway.
+    fn run_detection_strict(
+        &self,
+        frame: &Frame,
+        min_face_size: u32,
+    ) -> std::result::Result<StrictDetection, ResponseEnvelope> {
+        let mut guard = self.inference.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = Some(load_inference(&self.models).map_err(|e| {
+                tracing::error!("cannot load inference models: {e}");
+                ResponseEnvelope::error(ErrorCode::Internal, "broker inference unavailable")
+            })?);
+        }
+        let state = guard.as_mut().expect("inference loaded above");
+
+        let detections = state.detector.detect(frame, min_face_size).map_err(|e| {
+            tracing::warn!("detection error: {e}");
+            ResponseEnvelope::error(ErrorCode::Internal, "face detection failed")
+        })?;
+        Ok(match detections.len() {
+            0 => StrictDetection::NoFace,
+            1 => StrictDetection::Detection(detections.into_iter().next().expect("len checked")),
+            _ => StrictDetection::MultipleFaces,
+        })
+    }
+
+    fn run_inference_details(
+        &self,
+        frame: &Frame,
+        require_exactly_one_face: bool,
+    ) -> std::result::Result<InferenceDetailsResult, ResponseEnvelope> {
         let mut guard = self.inference.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
             *guard = Some(load_inference(&self.models).map_err(|e| {
@@ -494,18 +826,30 @@ impl BrokerState {
                 ResponseEnvelope::error(ErrorCode::Internal, "face detection failed")
             })?;
 
-        let Some(detection) = detections
+        let detection = if require_exactly_one_face {
+            match detections.len() {
+                0 => return Ok(InferenceDetailsResult::NoFace),
+                1 => {}
+                _ => return Ok(InferenceDetailsResult::MultipleFaces),
+            }
+            detections.into_iter().next().expect("len checked")
+        } else if let Some(detection) = detections
             .into_iter()
             .max_by(|a, b| a.bbox.area().total_cmp(&b.bbox.area()))
-        else {
-            return Ok(None);
+        {
+            detection
+        } else {
+            return Ok(InferenceDetailsResult::NoFace);
         };
 
         let embedding = state.embedder.extract(frame, &detection).map_err(|e| {
             tracing::warn!("embedding error: {e}");
             ResponseEnvelope::error(ErrorCode::Internal, "face embedding failed")
         })?;
-        Ok(Some(embedding))
+        Ok(InferenceDetailsResult::Probe(InferenceProbe {
+            detection,
+            embedding,
+        }))
     }
 
     fn enroll(
@@ -557,6 +901,115 @@ impl BrokerState {
             }
             Err(e) => storage_error(e),
         }
+    }
+
+    fn users(&self, peer: Option<PeerCredentials>) -> ResponseEnvelope {
+        let Some(peer) = peer else {
+            return unauthorized();
+        };
+        let expected = facegate_ids().ok();
+        let usernames = if peer.uid == 0 {
+            match self.storage_usernames() {
+                Ok(usernames) => usernames,
+                Err(e) => return storage_error(e),
+            }
+        } else {
+            match username_for_uid(peer.uid) {
+                Ok(Some(username)) => vec![username],
+                Ok(None) => return unauthorized(),
+                Err(_) => return unauthorized(),
+            }
+        };
+
+        let mut users = Vec::new();
+        for username in usernames {
+            match self.user_summary(&username, expected) {
+                Ok(Some(summary)) => users.push(summary),
+                Ok(None) => {}
+                Err(e) => return storage_error(e),
+            }
+        }
+        users.sort_by(|a, b| a.username.cmp(&b.username));
+        ResponseEnvelope::ok(Response::Users { users })
+    }
+
+    fn storage_usernames(&self) -> std::result::Result<Vec<String>, FaceRsError> {
+        let mut usernames = Vec::new();
+        let entries = match fs::read_dir(&self.storage_base_dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(usernames),
+            Err(e) => {
+                return Err(FaceRsError::Storage(format!(
+                    "cannot read {}: {e}",
+                    self.storage_base_dir.display()
+                )));
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(|e| FaceRsError::Storage(e.to_string()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|e| FaceRsError::Storage(e.to_string()))?;
+            if !file_type.is_dir() {
+                continue;
+            }
+            let Some(username) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            usernames.push(username.to_owned());
+        }
+        Ok(usernames)
+    }
+
+    fn user_summary(
+        &self,
+        username: &str,
+        expected: Option<(u32, u32)>,
+    ) -> std::result::Result<Option<EnrolledUserSummary>, FaceRsError> {
+        let mut store = self.store().load(username)?;
+        if store.templates.is_empty() {
+            return Ok(None);
+        }
+        let mut scopes = Vec::new();
+        for scope in [
+            TemplateScope::Sudo,
+            TemplateScope::Session,
+            TemplateScope::Both,
+        ] {
+            if store
+                .templates
+                .iter()
+                .any(|template| template.scope == scope)
+            {
+                scopes.push(ipc_template_scope(scope));
+            }
+        }
+        let first_enrolled_at = store
+            .templates
+            .iter()
+            .map(|template| template.created_at.as_str())
+            .min()
+            .map(str::to_owned);
+        let last_enrolled_at = store
+            .templates
+            .iter()
+            .map(|template| template.created_at.as_str())
+            .max()
+            .map(str::to_owned);
+        let user_dir = self.storage_base_dir.join(username);
+        let embeddings_file = user_dir.join("embeddings.json");
+        let summary = EnrolledUserSummary {
+            username: username.to_owned(),
+            template_count: store.templates.len(),
+            scopes,
+            first_enrolled_at,
+            last_enrolled_at,
+            directory: ownership_summary(&user_dir, expected, 0o700),
+            embeddings_file: ownership_summary(&embeddings_file, expected, 0o600),
+        };
+        self.zeroize_templates(&mut store.templates);
+        Ok(Some(summary))
     }
 
     fn remove(
@@ -812,6 +1265,35 @@ fn authorized_for_user_or_root(peer: Option<PeerCredentials>, username: &str) ->
     peer.uid == 0 || uid_for_username(username).ok().flatten() == Some(peer.uid)
 }
 
+fn username_for_uid(uid: u32) -> Result<Option<String>> {
+    let mut buf = vec![0i8; 4096];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+
+    let rc = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &mut pwd,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 {
+        anyhow::bail!(
+            "getpwuid_r failed for uid {uid}: {}",
+            std::io::Error::from_raw_os_error(rc)
+        );
+    }
+    if result.is_null() {
+        return Ok(None);
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) }
+        .to_string_lossy()
+        .into_owned();
+    Ok(Some(name))
+}
+
 fn uid_for_username(username: &str) -> Result<Option<u32>> {
     let c_name =
         CString::new(username).with_context(|| format!("invalid username '{username}'"))?;
@@ -836,6 +1318,50 @@ fn uid_for_username(username: &str) -> Result<Option<u32>> {
     } else {
         Ok(Some(pwd.pw_uid))
     }
+}
+
+fn facegate_ids() -> Result<(u32, u32)> {
+    let uid = uid_for_username("facegate")?.unwrap_or(0);
+    let c_name = CString::new("facegate")?;
+    let mut buf = vec![0i8; 4096];
+    let mut grp: libc::group = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::group = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getgrnam_r(
+            c_name.as_ptr(),
+            &mut grp,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 {
+        anyhow::bail!(
+            "getgrnam_r failed for facegate: {}",
+            std::io::Error::from_raw_os_error(rc)
+        );
+    }
+    let gid = if result.is_null() { 0 } else { grp.gr_gid };
+    Ok((uid, gid))
+}
+
+fn ownership_summary(
+    path: &Path,
+    expected: Option<(u32, u32)>,
+    expected_mode: u32,
+) -> Option<OwnershipSummary> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    let mode = meta.permissions().mode() & 0o777;
+    let (expected_uid, expected_gid) = expected.unwrap_or((meta.uid(), meta.gid()));
+    Some(OwnershipSummary {
+        uid: meta.uid(),
+        gid: meta.gid(),
+        mode,
+        ok: meta.uid() == expected_uid
+            && meta.gid() == expected_gid
+            && mode == expected_mode
+            && !meta.file_type().is_symlink(),
+    })
 }
 
 fn unauthorized() -> ResponseEnvelope {
@@ -943,7 +1469,61 @@ fn frame_from_probe(probe: &FrameProbe) -> std::result::Result<Frame, ResponseEn
         data,
         width: probe.width,
         height: probe.height,
+        captured_at_ms: probe.captured_at_ms,
     })
+}
+
+fn frames_are_synchronized(a_ms: u64, b_ms: u64, max_skew_ms: u64) -> bool {
+    if a_ms == 0 || b_ms == 0 {
+        return false;
+    }
+    a_ms.abs_diff(b_ms) <= max_skew_ms
+}
+
+fn cross_stream_position_consistency(
+    rgb: &Detection,
+    ir: &Detection,
+    homography: &[f32; 9],
+    max_position_offset_px: f32,
+) -> std::result::Result<(), MatchReason> {
+    let rgb_centroid = landmark_centroid(rgb);
+    let ir_centroid = landmark_centroid(ir);
+    let Some(mapped_ir) = apply_homography(ir_centroid, homography) else {
+        return Err(MatchReason::CrossCheckPositionMismatch);
+    };
+    let dx = rgb_centroid.0 - mapped_ir.0;
+    let dy = rgb_centroid.1 - mapped_ir.1;
+    let position_offset = (dx * dx + dy * dy).sqrt();
+    if !position_offset.is_finite() || position_offset > max_position_offset_px {
+        return Err(MatchReason::CrossCheckPositionMismatch);
+    }
+    Ok(())
+}
+
+fn landmark_centroid(detection: &Detection) -> (f32, f32) {
+    let points = &detection.landmarks.points;
+    let mut x = 0.0;
+    let mut y = 0.0;
+    for (px, py) in points {
+        x += px;
+        y += py;
+    }
+    (x / points.len() as f32, y / points.len() as f32)
+}
+
+fn apply_homography(point: (f32, f32), h: &[f32; 9]) -> Option<(f32, f32)> {
+    let (x, y) = point;
+    let denom = h[6] * x + h[7] * y + h[8];
+    if !denom.is_finite() || denom.abs() < f32::EPSILON {
+        return None;
+    }
+    let mapped_x = (h[0] * x + h[1] * y + h[2]) / denom;
+    let mapped_y = (h[3] * x + h[4] * y + h[5]) / denom;
+    if mapped_x.is_finite() && mapped_y.is_finite() {
+        Some((mapped_x, mapped_y))
+    } else {
+        None
+    }
 }
 
 fn unix_now() -> u64 {
@@ -956,6 +1536,7 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use facegate_core::detection::{BoundingBox, Landmarks};
     use facegate_ipc::{AuthScope as IpcAuthScope, TemplateScope as IpcTemplateScope};
 
     fn unit_vec(v: &[f32]) -> Vec<f32> {
@@ -968,10 +1549,26 @@ mod tests {
         let state = BrokerState {
             storage_base_dir: dir.path().to_owned(),
             audit_path: dir.path().join("audit.log"),
-            threshold: 0.55,
+            sudo_policy: EffectiveRecognitionPolicy {
+                threshold: 0.60,
+                required_matches: 2,
+                max_attempts: 5,
+            },
+            session_policy: EffectiveRecognitionPolicy {
+                threshold: 0.55,
+                required_matches: 1,
+                max_attempts: 3,
+            },
             min_face_size: 80,
             cooldown_after_failures: 10,
             cooldown_duration: Duration::from_secs(60),
+            cross_check: CrossCheckPolicy {
+                required: false,
+                max_time_skew_ms: 50,
+                max_position_offset_px: 40.0,
+                homography: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                ir_min_face_size: 80,
+            },
             abuse: Arc::new(Mutex::new(AbuseState::default())),
             models: facegate_core::config::ModelsConfig {
                 detector: std::path::PathBuf::new(),
@@ -1042,6 +1639,35 @@ mod tests {
     }
 
     #[test]
+    fn users_lists_metadata_without_embeddings() {
+        let (_dir, state) = test_state();
+        let peer = Some(PeerCredentials { uid: 0 });
+        state.dispatch(
+            RequestEnvelope::new(Request::Enroll {
+                username: "alice".to_owned(),
+                label: "sudo".to_owned(),
+                scope: IpcTemplateScope::Sudo,
+                embedding: unit_vec(&[1.0, 0.0]),
+            }),
+            peer,
+        );
+
+        let response = state.dispatch(RequestEnvelope::new(Request::Users), peer);
+        let Response::Users { users } = response.response else {
+            panic!("expected users response");
+        };
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].username, "alice");
+        assert_eq!(users[0].template_count, 1);
+        assert_eq!(users[0].scopes, vec![IpcTemplateScope::Sudo]);
+
+        let json = serde_json::to_string(&ResponseEnvelope::ok(Response::Users { users }))
+            .expect("serialize users response");
+        assert!(json.contains("alice"));
+        assert!(!json.contains("embedding\":"));
+    }
+
+    #[test]
     fn match_returns_decision_without_vector() {
         let (_dir, state) = test_state();
         let peer = Some(PeerCredentials { uid: 0 });
@@ -1071,6 +1697,7 @@ mod tests {
 
         assert!(result.matched);
         assert_eq!(result.template_id, Some(0));
+        assert_eq!(result.reason, MatchReason::Matched);
     }
 
     #[test]
@@ -1205,6 +1832,7 @@ mod tests {
                     format: facegate_ipc::FrameFormat::Rgb8,
                     width: 4,
                     height: 4,
+                    captured_at_ms: 1,
                     bytes: vec![0; 10], // expected 48 bytes
                 },
             }),
@@ -1227,6 +1855,7 @@ mod tests {
                     format: facegate_ipc::FrameFormat::Gray8,
                     width: 8192,
                     height: 8192,
+                    captured_at_ms: 1,
                     bytes: vec![],
                 },
             }),
@@ -1244,6 +1873,7 @@ mod tests {
             format: facegate_ipc::FrameFormat::Bgr8,
             width: 1,
             height: 1,
+            captured_at_ms: 1,
             bytes: vec![10, 20, 30], // B=10, G=20, R=30
         };
         let frame = frame_from_probe(&probe).expect("decode");
@@ -1256,10 +1886,109 @@ mod tests {
             format: facegate_ipc::FrameFormat::Gray8,
             width: 2,
             height: 1,
+            captured_at_ms: 1,
             bytes: vec![42, 200],
         };
         let frame = frame_from_probe(&probe).expect("decode");
         assert_eq!(frame.data, vec![42, 42, 42, 200, 200, 200]);
+    }
+
+    #[test]
+    fn cross_check_required_rejects_single_frame() {
+        let (_dir, mut state) = test_state();
+        state.cross_check.required = true;
+        let response = state.dispatch(
+            RequestEnvelope::new(Request::MatchFrame {
+                username: "alice".to_owned(),
+                auth_scope: IpcAuthScope::Session,
+                frame: facegate_ipc::FrameProbe {
+                    format: facegate_ipc::FrameFormat::Rgb8,
+                    width: 1,
+                    height: 1,
+                    captured_at_ms: 1,
+                    bytes: vec![0, 0, 0],
+                },
+            }),
+            Some(PeerCredentials { uid: 0 }),
+        );
+        let Response::Match { result } = response.response else {
+            panic!("expected match response");
+        };
+        assert!(!result.matched);
+        assert_eq!(result.score, None);
+        assert_eq!(result.reason, MatchReason::CrossCheckRequired);
+    }
+
+    #[test]
+    fn cross_check_rejects_unsynchronized_frames() {
+        let (_dir, mut state) = test_state();
+        state.cross_check.required = true;
+        let response = state.dispatch(
+            RequestEnvelope::new(Request::MatchFramePair {
+                username: "alice".to_owned(),
+                auth_scope: IpcAuthScope::Session,
+                rgb_frame: one_pixel_rgb(100),
+                ir_frame: one_pixel_rgb(200),
+            }),
+            Some(PeerCredentials { uid: 0 }),
+        );
+        let Response::Match { result } = response.response else {
+            panic!("expected match response");
+        };
+        assert!(!result.matched);
+        assert_eq!(result.score, None);
+        assert_eq!(result.reason, MatchReason::CrossCheckTimeSkew);
+    }
+
+    #[test]
+    fn cross_stream_position_consistency_rejects_position_mismatch() {
+        let rgb = detection_at((10.0, 10.0));
+        let ir = detection_at((100.0, 100.0));
+        assert_eq!(
+            cross_stream_position_consistency(
+                &rgb,
+                &ir,
+                &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                40.0,
+            ),
+            Err(MatchReason::CrossCheckPositionMismatch)
+        );
+    }
+
+    #[test]
+    fn cross_stream_position_consistency_accepts_aligned_pair() {
+        let rgb = detection_at((40.0, 30.0));
+        let ir = detection_at((30.0, 25.0));
+        let homography = [1.0, 0.0, 10.0, 0.0, 1.0, 5.0, 0.0, 0.0, 1.0];
+        assert_eq!(
+            cross_stream_position_consistency(&rgb, &ir, &homography, 5.0),
+            Ok(())
+        );
+    }
+
+    fn one_pixel_rgb(captured_at_ms: u64) -> facegate_ipc::FrameProbe {
+        facegate_ipc::FrameProbe {
+            format: facegate_ipc::FrameFormat::Rgb8,
+            width: 1,
+            height: 1,
+            captured_at_ms,
+            bytes: vec![0, 0, 0],
+        }
+    }
+
+    fn detection_at(centroid: (f32, f32)) -> Detection {
+        Detection {
+            bbox: BoundingBox {
+                x1: centroid.0 - 5.0,
+                y1: centroid.1 - 5.0,
+                x2: centroid.0 + 5.0,
+                y2: centroid.1 + 5.0,
+                confidence: 1.0,
+            },
+            landmarks: Landmarks {
+                points: [centroid; 5],
+            },
+        }
     }
 
     #[test]

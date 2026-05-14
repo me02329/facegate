@@ -43,7 +43,7 @@ Facegate lets you authenticate with your face for `sudo`, login sessions, and sc
 
 
 ---
-<img width="1615" height="970" alt="image" src="https://github.com/user-attachments/assets/6f40bec9-b786-41cf-8805-edf4e9a01a1f" />
+![Facegate TUI — main menu](images/tui.png)
 
 ---
 
@@ -53,10 +53,15 @@ Facegate lets you authenticate with your face for `sudo`, login sessions, and sc
 - Face authentication via a standard Linux PAM module (`pam_facegate.so`) for `sudo`, `su`, and login managers (SDDM, LightDM, GDM, greetd)
 - **Privileged broker daemon (`facegate-brokerd`)** — a dedicated system service running as the unprivileged `facegate` user that owns templates, runs SCRFD + ArcFace, and exposes only match decisions over a local Unix socket (added in v0.2.0)
 - **Frame-based matching (`MatchFrame`)** — clients submit raw camera frames; the broker performs detection, embedding extraction, and comparison itself. A same-UID attacker cannot bypass live capture by replaying a precomputed embedding (v0.2.0)
-- Interactive TUI to configure, enroll faces, run diagnostics, and manage all auth modes
+- Interactive TUI to configure, enroll faces, run diagnostics, and manage all auth modes, with a **live system status panel** on the idle screen (broker, watch, PAM scopes, RGB/IR cameras, last auth event, template count) that refreshes without input
 - Guided first-time setup flow (`facegate setup`) covering camera selection, enrolment, and PAM wiring
 - Threshold calibration command (`facegate calibrate`) that recommends a recognition threshold from live positive samples
 - Compact installation summary (`facegate status`) including broker reachability, model presence, enrolled templates, and recent audit events
+- Admin enrollment overview (`facegate users`) showing all enrolled users and broker storage ownership state
+- **Recovery tooling** — `facegate emergency-disable [--dry-run]` restores Facegate PAM backups and stops services, with `docs/recovery.md` covering shell, TTY, chroot, and live-USB flows
+- **Broker administration** — `facegate broker {status,health,restart,logs,repair-permissions}` for inspecting and maintaining the daemon without leaving the CLI/TUI
+- **Scope-specific recognition policy** — `[recognition.sudo]` and `[recognition.session]` apply stricter sudo defaults (threshold 0.60, two required matches) while keeping session unlock convenient
+- **Optional RGB+IR cross-check** — when a `[camera.ir]` section is set and `[camera.cross_check].enabled = true`, the broker requires a synchronised `MatchFramePair` and rejects probes whose capture timestamps disagree or whose RGB/IR landmarks fail spatial alignment (liveness signal — not a full PAD model)
 - Multi-sample enrollment with separate templates per capture for better accuracy
 - Per-template auth scopes (`sudo`, `session`, or `both`)
 - ArcFace embeddings + SCRFD face detector (ONNX Runtime, fully on-device)
@@ -105,9 +110,9 @@ Devices that report `GREY` / `Y8` / `Y800` formats are IR streams; devices
 that only report `YUYV` / `MJPG` are RGB. Update `[camera].device` in
 `/etc/facegate/config.toml` accordingly (or run `sudo facegate configure`).
 
-> **Dual-camera cross-check (planned, v0.3.0).** On laptops that expose
-> both an IR and an RGB sensor, Facegate will optionally require a match
-> on *both* streams to defeat single-camera photo/replay attacks.
+> **Dual-camera cross-check.** On laptops that expose both an IR and an
+> RGB sensor, Facegate can require a synchronized match on *both* streams
+> to reduce single-camera photo/replay attacks.
 > Tracked as `docs/security-issues/09-dual-camera-cross-check.md`.
 
 ---
@@ -348,21 +353,41 @@ systemctl --user enable --now facegate-watch
 | `configure` | Edit settings in a terminal UI |
 | `setup [USERNAME]` | Guided first-time setup flow (camera → enrol → PAM wiring) |
 | `status` | Compact installation, broker reachability, and enrolment summary (also shows recent audit events) |
+| `logs [--lines N]` | Show the current user's local diagnostic log |
+| `emergency-disable [--dry-run]` | Restore Facegate PAM backups, remove remaining Facegate PAM lines, and stop services |
+| `users [--json]` | List enrolled users and broker storage ownership state |
+| `broker status` | Show broker service, socket, audit log, and storage status |
+| `broker health` | Ping the broker over IPC and print version/protocol |
+| `broker restart` | Restart `facegate-brokerd.service` |
+| `broker logs [--lines N]` | Show recent `facegate-brokerd.service` journal lines |
+| `broker repair-permissions` | Re-apply `facegate:facegate` ownership and private modes to broker storage |
 | `doctor` | Check installation status |
 | `cameras` | List `/dev/video*` and flag IR vs RGB |
 | `camera-test [--device DEV]` | Test camera and face detection |
 | `add USERNAME [--label LABEL] [--for sudo\|session\|both]` | Enroll face templates |
 | `list USERNAME` | List enrolled templates (via the broker) |
 | `remove USERNAME ID` | Remove a template by ID (via the broker) |
+| `forget USERNAME [--yes]` | Remove every enrolled template for a user (confirmation by default) |
 | `test USERNAME [--for sudo\|session\|all]` | Live recognition test |
 | `calibrate USERNAME [--for sudo\|session] [--samples N] [--write]` | Recommend a recognition threshold from live positive samples; `--write` offers to save it to the config |
+| `calibrate-cameras [--rgb-device DEV] [--ir-device DEV] [--samples N] [--write] [--enable]` | Estimate the IR→RGB homography for dual-stream cross-check |
 | `session-auth` | Toggle face auth in login/session PAM services |
 | `completions SHELL` | Print shell completion script |
 
-All commands except `completions`, `cameras`, `status`, and the internal
-`watch`/`auth` helpers require root. `cameras`, `status`, and `watch` run as
-the normal user. All template reads/writes and all match decisions
+All commands except `completions`, `cameras`, `status`, `logs`,
+`users`, `broker status`, `broker health`, `broker logs`, and the internal
+`watch`/`auth` helpers require root. `cameras`, `status`, `logs`, and `watch` run as
+the normal user. If PAM recovery is needed, see
+[`docs/recovery.md`](docs/recovery.md) and start with
+`sudo facegate emergency-disable --dry-run`.
+All template reads/writes and all match decisions
 ultimately go through `facegate-brokerd` over `/run/facegate/broker.sock`.
+
+Facegate also writes a user-readable diagnostic log at
+`~/.local/state/facegate/facegate.log`. It records coarse local events such as
+camera errors, timeouts, cross-check rejects, match scores, and accept/reject
+outcomes. It does not contain frames or embeddings. Use `facegate logs` to view
+recent lines.
 
 ---
 
@@ -379,11 +404,33 @@ fps = 30
 timeout_ms = 5000
 warmup_frames = 5
 
+# [camera.ir]
+# device = "/dev/video2"      # IR sensor for RGB+IR cross-check
+# # All other fields optional; blank = IR-friendly defaults
+# # min_face_size = 50
+
+[camera.cross_check]
+enabled = false
+max_time_skew_ms = 50
+max_position_offset_px = 40.0
+homography = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+allow_identity_homography = false   # refuse identity matrix unless explicit
+
 [recognition]
-threshold = 0.55        # cosine similarity threshold (higher = stricter)
-required_matches = 1    # how many templates must match
-max_attempts = 5        # capture attempts before giving up
+threshold = 0.55        # default cosine similarity threshold (higher = stricter)
+required_matches = 1    # default number of successful captures required
+max_attempts = 3        # default capture attempts before giving up
 min_face_size = 80      # minimum face bounding-box size in pixels
+
+[recognition.session]
+threshold = 0.55
+required_matches = 1
+max_attempts = 3
+
+[recognition.sudo]
+threshold = 0.60        # stricter privileged default
+required_matches = 2
+max_attempts = 5
 
 [models]
 detector = "/usr/share/facegate/models/scrfd_500m.onnx"
@@ -407,6 +454,34 @@ The `[security].cooldown_after_failures` / `cooldown_seconds` knobs are
 enforced server-side by the broker, per-peer-UID and per-username, so a
 hostile client cannot bypass the lockout by reconnecting.
 
+`[recognition.sudo]` and `[recognition.session]` can override
+`threshold`, `required_matches`, and `max_attempts` per scope. Higher
+thresholds and multiple required matches reduce false accepts, but they
+also increase false rejects under poor lighting or awkward camera angles.
+Use `sudo facegate calibrate USER --for sudo --write` and
+`sudo facegate calibrate USER --for session --write` to tune from live
+positive samples without exposing stored embeddings.
+
+When `[camera.cross_check].enabled = true`, a `[camera.ir]` section must be
+configured. Auth clients capture the RGB and IR streams in parallel and
+submit a `MatchFramePair` to the broker. The broker rejects the probe unless
+the pair is timestamp-synchronized within `max_time_skew_ms`, each stream
+contains exactly one face, and the IR face maps via `homography` to within
+`max_position_offset_px` of the RGB face. The IR check is a **liveness**
+signal (proves a real face is present and aligned); identity matching is done
+on the RGB embedding alone. Single-camera systems should leave this disabled.
+
+Use `sudo facegate calibrate-cameras --ir-device /dev/video2 --write` to
+estimate and write the `homography` from live RGB+IR landmark pairs. Add
+`--enable` only after testing the resulting config with `sudo facegate test
+<USER>`.
+
+Whenever Facegate writes `/etc/facegate/config.toml` through `configure`,
+`setup`, `calibrate --write`, or `calibrate-cameras --write`, it refreshes
+services automatically: the broker is restarted/started so it reads the new
+thresholds, model paths, storage path, and cross-check policy, and the
+per-user `facegate-watch` daemon is restarted if it is currently active.
+
 You can also use `facegate calibrate <USER> --write` to compute a
 threshold from real positive samples rather than guessing at
 `[recognition].threshold` by hand.
@@ -419,7 +494,7 @@ threshold from real positive samples rather than guessing at
 facegate/
 ├── crates/
 │   ├── facegate_core/      # camera, detection, embedding, matching, storage, config
-│   ├── facegate_ipc/       # versioned JSON-over-Unix-socket protocol (v2)
+│   ├── facegate_ipc/       # versioned JSON-over-Unix-socket protocol (v5)
 │   ├── facegate_brokerd/   # privileged broker daemon (facegate-brokerd)
 │   ├── facegate_cli/       # CLI + TUI + watch daemon (facegate binary)
 │   └── pam_facegate/       # PAM module (pam_facegate.so)
@@ -438,7 +513,7 @@ facegate/
 
 **`facegate_core`** handles the full ML pipeline: V4L2 capture, SCRFD face detection, ArcFace embedding extraction, cosine similarity matching, and secure template storage. Since v0.2.0 the detector + embedder are linked **only** into `facegate-brokerd`; the CLI and PAM helper rely on `facegate_core` exclusively for the V4L2 capture side.
 
-**`facegate_ipc`** defines the versioned JSON-over-Unix-socket protocol between clients and the broker. Protocol version is **v2**; clients built against v1 are rejected with `VersionMismatch`. Reinstall both the broker and the CLI together when upgrading.
+**`facegate_ipc`** defines the versioned JSON-over-Unix-socket protocol between clients and the broker. Protocol version is **v5**; mismatched clients are rejected with `VersionMismatch`. Reinstall both the broker and the CLI together when upgrading. See [`docs/ipc-protocol.md`](docs/ipc-protocol.md).
 
 **`facegate_brokerd`** is the new privileged broker (a system service started by systemd). It runs as the dedicated `facegate` user, owns all enrolled templates, performs face detection / embedding / matching on submitted frames, enforces rate limiting and lockouts, and writes the audit log. It does **not** open camera devices itself — frames arrive over the IPC socket.
 
@@ -449,6 +524,8 @@ facegate/
 ---
 
 ## Security
+
+For the detailed threat model, see [`docs/threat-model.md`](docs/threat-model.md).
 
 ### What Facegate is
 
@@ -491,11 +568,11 @@ client (any UID)          ──MatchFrame(raw frame)──▶   facegate-broker
 - **Frame envelopes are sanity-checked**: `MatchFrame` rejects frames
   whose declared geometry exceeds 4096² or whose buffer length
   disagrees with `width × height × bytes-per-pixel`. The request size
-  cap is 12 MB (enough for 1080p RGB after base64).
+  cap is 24 MB (enough for synchronized RGB+IR 1080p frames after base64).
 - **Peer credentials are enforced via `SO_PEERCRED`**, so the broker
   knows which UID owns each connection and can apply per-UID and
   per-username rate limits / lockouts.
-- **IPC protocol is versioned (v2).** A mismatched client is rejected
+- **IPC protocol is versioned (v5).** A mismatched client is rejected
   with `VersionMismatch`; you must reinstall the CLI and the broker
   together.
 
@@ -613,7 +690,7 @@ What is **not yet** equivalent to Windows Hello:
 | `video` group needed | no | no |
 | Network exposure | none (`PrivateNetwork=yes` on broker) | none |
 | D-Bus exposure | none | subscriber only (no listener) |
-| IPC exposure | AF_UNIX, `SO_PEERCRED`-checked, v2 protocol | AF_UNIX, `SO_PEERCRED`-checked, v2 protocol |
+| IPC exposure | AF_UNIX, `SO_PEERCRED`-checked, v3 protocol | AF_UNIX, `SO_PEERCRED`-checked, v3 protocol |
 | Forging a trigger | N/A — user initiates | requires impersonating systemd-logind (impossible for unprivileged code) |
 | Template readable by | `facegate` system user only | `facegate` system user only |
 | Replayable embedding bypass | blocked — `Match` restricted to uid=0, `MatchFrame` requires a frame | blocked — same as sudo path |

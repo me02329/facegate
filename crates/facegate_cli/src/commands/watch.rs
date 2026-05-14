@@ -7,13 +7,16 @@ use tokio::signal::unix::{signal, SignalKind};
 use zbus::proxy;
 use zbus::Connection;
 
-use facegate_core::camera::V4lCamera;
 use facegate_core::config::Config;
 use facegate_core::error::FaceRsError;
 use facegate_core::storage::AuthScope;
-use facegate_ipc::{FrameFormat, FrameProbe};
 
-use crate::commands::broker;
+use crate::commands::broker::{
+    capture_rgb_ir_pair, cross_check_active, frame_probe, open_ir_camera, open_rgb_camera,
+};
+use crate::commands::{broker, user_log};
+
+const CROSS_CHECK_CAPTURE_RETRIES: u32 = 3;
 
 // ── D-Bus proxies ─────────────────────────────────────────────────────────────
 
@@ -196,86 +199,191 @@ fn run_recognition(
     if cancel.load(Ordering::Relaxed) {
         return;
     }
+    user_log::append_for_user(username, "watch scan_start");
 
-    let mut camera = match V4lCamera::open(
-        &config.camera.device,
-        config.camera.width,
-        config.camera.height,
-        config.camera.fps,
-        config.camera.timeout_ms,
-    ) {
-        Ok(mut cam) => {
-            cam.warmup(config.camera.warmup_frames);
-            cam
-        }
+    let cross_check = cross_check_active(config);
+    let mut camera = match open_rgb_camera(config) {
+        Ok(cam) => cam,
         Err(e) => {
             tracing::error!("cannot open camera: {e}");
+            user_log::append_for_user(username, format!("watch camera_error device=rgb error={e}"));
             return;
         }
     };
+    let mut ir_camera = if cross_check {
+        match open_ir_camera(config) {
+            Ok(cam) => Some(cam),
+            Err(e) => {
+                tracing::error!("cannot open IR camera: {e}");
+                user_log::append_for_user(
+                    username,
+                    format!("watch camera_error device=ir error={e}"),
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
 
-    let required = config.recognition.required_matches.max(1);
+    let policy = config.recognition.policy_for(AuthScope::Session);
+    let required = policy.required_matches.max(1);
     let mut matches: u32 = 0;
 
-    for attempt in 1..=config.recognition.max_attempts {
+    for attempt in 1..=policy.max_attempts {
         if cancel.load(Ordering::Relaxed) {
             tracing::debug!("recognition cancelled (attempt {attempt})");
             return;
         }
 
-        match camera.capture_frame() {
-            Ok(frame) => {
-                let probe = FrameProbe {
-                    format: FrameFormat::Rgb8,
-                    width: frame.width,
-                    height: frame.height,
-                    bytes: frame.data,
+        let result = if let Some(ir_camera) = ir_camera.as_mut() {
+            let mut selected = None;
+            for capture_attempt in 1..=CROSS_CHECK_CAPTURE_RETRIES {
+                let (rgb_result, ir_result) = capture_rgb_ir_pair(&mut camera, ir_camera);
+                let rgb_frame =
+                    match watch_outcome_from_capture(rgb_result, username, attempt, "rgb") {
+                        WatchCaptureOutcome::Frame(frame) => frame,
+                        WatchCaptureOutcome::RetryAttempt => continue,
+                        WatchCaptureOutcome::StopScan => return,
+                    };
+                let ir_frame = match watch_outcome_from_capture(ir_result, username, attempt, "ir")
+                {
+                    WatchCaptureOutcome::Frame(frame) => frame,
+                    WatchCaptureOutcome::RetryAttempt => continue,
+                    WatchCaptureOutcome::StopScan => return,
                 };
-                match broker::match_frame(username, AuthScope::Session, probe) {
-                    Ok(result) if result.matched => {
-                        matches += 1;
-                        tracing::debug!(
-                            attempt,
-                            matches,
-                            required,
+                let result = broker::match_frame_pair(
+                    username,
+                    AuthScope::Session,
+                    frame_probe(rgb_frame),
+                    frame_probe(ir_frame),
+                );
+                match &result {
+                    Ok(result)
+                        if !result.matched
+                            && result.score.is_none()
+                            && broker::match_reason_is_retryable_capture(result.reason)
+                            && capture_attempt < CROSS_CHECK_CAPTURE_RETRIES =>
+                    {
+                        user_log::append_for_user(
                             username,
-                            score = result.score,
-                            "match accepted"
+                            format!(
+                                "watch retry attempt={attempt} capture_attempt={capture_attempt} reason={}",
+                                broker::match_reason_label(result.reason)
+                            ),
                         );
-                        if matches >= required {
-                            tracing::info!(username, "face recognised — unlocking session");
-                            // Use the async D-Bus proxy from a blocking context.
-                            let result =
-                                tokio::runtime::Handle::current().block_on(session.unlock());
-                            if let Err(e) = result {
-                                tracing::error!("unlock call failed: {e}");
-                            }
-                            return;
-                        }
+                        continue;
                     }
-                    Ok(result) => {
-                        tracing::debug!(
-                            attempt,
-                            username,
-                            score = result.score,
-                            "attempt did not match"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("broker match error: {e}");
-                        return;
+                    _ => {
+                        selected = Some(result);
+                        break;
                     }
                 }
             }
-            Err(FaceRsError::Timeout) => {
-                tracing::debug!(attempt, "capture timeout");
+            match selected {
+                Some(result) => result,
+                None => continue,
+            }
+        } else {
+            let frame = match watch_outcome_from_capture(
+                camera.capture_frame(),
+                username,
+                attempt,
+                "rgb",
+            ) {
+                WatchCaptureOutcome::Frame(frame) => frame,
+                WatchCaptureOutcome::RetryAttempt => continue,
+                WatchCaptureOutcome::StopScan => return,
+            };
+            broker::match_frame(username, AuthScope::Session, frame_probe(frame))
+        };
+
+        match result {
+            Ok(result) if result.matched => {
+                matches += 1;
+                tracing::debug!(
+                    attempt,
+                    matches,
+                    required,
+                    username,
+                    score = result.score,
+                    "match accepted"
+                );
+                if matches >= required {
+                    tracing::info!(username, "face recognised — unlocking session");
+                    user_log::append_for_user(
+                        username,
+                        format!(
+                            "watch accept reason={} score={:?}",
+                            broker::match_reason_label(result.reason),
+                            result.score
+                        ),
+                    );
+                    // Use the async D-Bus proxy from a blocking context.
+                    let result = tokio::runtime::Handle::current().block_on(session.unlock());
+                    if let Err(e) = result {
+                        tracing::error!("unlock call failed: {e}");
+                    }
+                    return;
+                }
+            }
+            Ok(result) => {
+                user_log::append_for_user(
+                    username,
+                    format!(
+                        "watch reject attempt={attempt} reason={} score={:?}",
+                        broker::match_reason_label(result.reason),
+                        result.score
+                    ),
+                );
+                tracing::debug!(
+                    attempt,
+                    username,
+                    score = result.score,
+                    "attempt did not match"
+                );
             }
             Err(e) => {
-                tracing::error!("capture error: {e}");
+                tracing::error!("broker match error: {e}");
+                user_log::append_for_user(username, format!("watch broker_error error={e}"));
                 return;
             }
         }
     }
 
     tracing::info!(username, "face recognition exhausted all attempts");
+    user_log::append_for_user(username, "watch exhausted_attempts");
+}
+
+enum WatchCaptureOutcome {
+    Frame(facegate_core::camera::Frame),
+    RetryAttempt,
+    StopScan,
+}
+
+fn watch_outcome_from_capture(
+    result: std::result::Result<facegate_core::camera::Frame, FaceRsError>,
+    username: &str,
+    attempt: u32,
+    device: &str,
+) -> WatchCaptureOutcome {
+    match result {
+        Ok(frame) => WatchCaptureOutcome::Frame(frame),
+        Err(FaceRsError::Timeout) => {
+            tracing::debug!(attempt, device, "capture timeout");
+            user_log::append_for_user(
+                username,
+                format!("watch timeout attempt={attempt} device={device}"),
+            );
+            WatchCaptureOutcome::RetryAttempt
+        }
+        Err(e) => {
+            tracing::error!("{device} capture error: {e}");
+            user_log::append_for_user(
+                username,
+                format!("watch capture_error attempt={attempt} device={device} error={e}"),
+            );
+            WatchCaptureOutcome::StopScan
+        }
+    }
 }

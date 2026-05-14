@@ -52,27 +52,42 @@ pub fn run_streaming(tx: &Sender<String>) -> anyhow::Result<()> {
     out!("Detected video devices:");
     out!("");
 
-    let mut suggestion: Option<(String, &'static str)> = None;
+    let mut recommended = RecommendedCameras::default();
 
     for path in &paths {
-        describe_device(tx, path, &mut suggestion);
+        describe_device(tx, path, &mut recommended);
     }
 
     out!("");
-    out!("Legend:  IR  = grayscale stream (Y8 / GREY) — preferred for face auth");
-    out!("         RGB = colour stream (YUYV / MJPG)  — works but less robust");
+    out!("Legend:  RGB = colour stream (YUYV / MJPG)  — primary camera for face matching");
+    out!("         IR  = grayscale stream (Y8 / GREY) — optional, used as a liveness");
+    out!("                                              signal in RGB+IR cross-check");
     out!("");
 
-    match suggestion {
-        Some((path, kind)) => {
-            out!("Recommended device: {path}  ({kind})");
+    match (&recommended.rgb, &recommended.ir) {
+        (Some(rgb), Some(ir)) => {
+            out!("Recommended:");
+            out!("  [camera].device      = \"{rgb}\"   (RGB — primary)");
+            out!("  [camera.ir].device   = \"{ir}\"   (IR — cross-check)");
             out!("");
-            out!("Set it as your camera:");
-            out!("  sudo facegate configure        # then edit [camera].device");
-            out!("  # or directly in /etc/facegate/config.toml:");
-            out!("  device = \"{path}\"");
+            out!("Quickest path:");
+            out!("  sudo facegate setup            # picks both + offers calibration");
+            out!("  sudo facegate calibrate-cameras --write --enable");
         }
-        None => {
+        (Some(rgb), None) => {
+            out!("Recommended:");
+            out!("  [camera].device = \"{rgb}\"   (RGB — primary)");
+            out!("");
+            out!("No IR sensor detected, so RGB+IR cross-check is unavailable on");
+            out!("this hardware. Set the device with:");
+            out!("  sudo facegate configure        # edit [camera].device");
+        }
+        (None, Some(ir)) => {
+            out!("Only an IR sensor was detected ({ir}); facegate needs an RGB");
+            out!("camera as the primary device. Plug in a webcam and re-run, or");
+            out!("set [camera].device manually to whichever node speaks YUYV/MJPG.");
+        }
+        (None, None) => {
             out!("No device exposes a capture format we can use.");
             out!("Run `v4l2-ctl --list-devices` to inspect them manually.");
         }
@@ -81,11 +96,13 @@ pub fn run_streaming(tx: &Sender<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn describe_device(
-    tx: &Sender<String>,
-    path: &Path,
-    suggestion: &mut Option<(String, &'static str)>,
-) {
+#[derive(Default)]
+struct RecommendedCameras {
+    rgb: Option<String>,
+    ir: Option<String>,
+}
+
+fn describe_device(tx: &Sender<String>, path: &Path, recommended: &mut RecommendedCameras) {
     macro_rules! out {
         ($($arg:tt)*) => {{ let _ = tx.send(format!($($arg)*)); }};
     }
@@ -133,12 +150,13 @@ fn describe_device(
     }
     out!("        formats: {}", fourccs.join(", "));
 
-    // First IR device wins; otherwise fall back to the first RGB device we
-    // find. The user can always override later in config.toml.
-    if is_ir && suggestion.as_ref().is_none_or(|(_, k)| *k != "IR") {
-        *suggestion = Some((path_str.clone(), "IR"));
-    } else if is_rgb && suggestion.is_none() {
-        *suggestion = Some((path_str.clone(), "RGB"));
+    // Record the first plain-RGB and the first IR-only node we find. Dual-mode
+    // sensors that report both YUYV/MJPG and GREY are treated as RGB primaries
+    // (the colour stream is the useful one); pure IR nodes go to camera.ir.
+    if is_ir && !is_rgb && recommended.ir.is_none() {
+        recommended.ir = Some(path_str.clone());
+    } else if is_rgb && recommended.rgb.is_none() {
+        recommended.rgb = Some(path_str.clone());
     }
 
     // Probe a default capture format to detect non-capture nodes (some
