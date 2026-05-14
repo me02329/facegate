@@ -53,11 +53,15 @@ Facegate lets you authenticate with your face for `sudo`, login sessions, and sc
 - Face authentication via a standard Linux PAM module (`pam_facegate.so`) for `sudo`, `su`, and login managers (SDDM, LightDM, GDM, greetd)
 - **Privileged broker daemon (`facegate-brokerd`)** — a dedicated system service running as the unprivileged `facegate` user that owns templates, runs SCRFD + ArcFace, and exposes only match decisions over a local Unix socket (added in v0.2.0)
 - **Frame-based matching (`MatchFrame`)** — clients submit raw camera frames; the broker performs detection, embedding extraction, and comparison itself. A same-UID attacker cannot bypass live capture by replaying a precomputed embedding (v0.2.0)
-- Interactive TUI to configure, enroll faces, run diagnostics, and manage all auth modes
+- Interactive TUI to configure, enroll faces, run diagnostics, and manage all auth modes, with a **live system status panel** on the idle screen (broker, watch, PAM scopes, RGB/IR cameras, last auth event, template count) that refreshes without input
 - Guided first-time setup flow (`facegate setup`) covering camera selection, enrolment, and PAM wiring
 - Threshold calibration command (`facegate calibrate`) that recommends a recognition threshold from live positive samples
 - Compact installation summary (`facegate status`) including broker reachability, model presence, enrolled templates, and recent audit events
 - Admin enrollment overview (`facegate users`) showing all enrolled users and broker storage ownership state
+- **Recovery tooling** — `facegate emergency-disable [--dry-run]` restores Facegate PAM backups and stops services, with `docs/recovery.md` covering shell, TTY, chroot, and live-USB flows
+- **Broker administration** — `facegate broker {status,health,restart,logs,repair-permissions}` for inspecting and maintaining the daemon without leaving the CLI/TUI
+- **Scope-specific recognition policy** — `[recognition.sudo]` and `[recognition.session]` apply stricter sudo defaults (threshold 0.60, two required matches) while keeping session unlock convenient
+- **Optional RGB+IR cross-check** — when a `[camera.ir]` section is set and `[camera.cross_check].enabled = true`, the broker requires a synchronised `MatchFramePair` and rejects probes whose capture timestamps disagree or whose RGB/IR landmarks fail spatial alignment (liveness signal — not a full PAD model)
 - Multi-sample enrollment with separate templates per capture for better accuracy
 - Per-template auth scopes (`sudo`, `session`, or `both`)
 - ArcFace embeddings + SCRFD face detector (ONNX Runtime, fully on-device)
