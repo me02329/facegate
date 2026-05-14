@@ -87,10 +87,10 @@ fn print_camera(config: &Config) {
         yes_no(path.exists()),
         camera_kind(path)
     );
-    match config.camera.ir_device.as_deref() {
-        Some(ir_device) => {
-            let ir_path = Path::new(ir_device);
-            println!("  ir     : {ir_device}");
+    match config.camera.ir.as_ref() {
+        Some(ir) => {
+            let ir_path = Path::new(&ir.device);
+            println!("  ir     : {}", ir.device);
             println!(
                 "           exists={} kind={}",
                 yes_no(ir_path.exists()),

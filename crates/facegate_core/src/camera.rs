@@ -7,7 +7,7 @@ use v4l::{Device, FourCC};
 
 use crate::error::{FaceRsError, Result};
 use std::ptr::NonNull;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// RGB24 frame ready for ML preprocessing.
 #[derive(Debug, Clone)]
@@ -16,6 +16,10 @@ pub struct Frame {
     pub data: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// Wall-clock millisecond timestamp stamped immediately after the V4L2
+    /// buffer was dequeued. Used as the client-side capture instant for the
+    /// RGB+IR sync window, so it must not be set later in the pipeline.
+    pub captured_at_ms: u64,
 }
 
 impl Frame {
@@ -139,6 +143,7 @@ impl V4lCamera {
             .ok_or_else(|| FaceRsError::Camera("camera stream is closed".to_string()))?
             .next()
             .map_err(|e| FaceRsError::Camera(format!("capture failed: {e}")))?;
+        let captured_at_ms = now_ms();
 
         let (rgb, width, height) = match self.format {
             CaptureFormat::Yuyv => (
@@ -158,8 +163,22 @@ impl V4lCamera {
             data: rgb,
             width,
             height,
+            captured_at_ms,
         })
     }
+}
+
+// V4lCamera owns a Box-leaked Device pointer; the OS file descriptor underneath
+// is safe to use from another thread as long as we don't share the camera
+// concurrently. We only move ownership across threads (one camera per thread)
+// via `std::thread::scope` for parallel RGB+IR capture.
+unsafe impl Send for V4lCamera {}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 impl Drop for V4lCamera {

@@ -1,9 +1,11 @@
 use anyhow::anyhow;
 use facegate_core::config::{
-    CameraConfig, CameraCrossCheckConfig, Config, LoggingConfig, ModelsConfig, RecognitionConfig,
-    SecurityConfig, StorageConfig,
+    CameraConfig, CameraCrossCheckConfig, CameraIrConfig, Config, LoggingConfig, ModelsConfig,
+    RecognitionConfig, SecurityConfig, StorageConfig,
 };
 use std::path::PathBuf;
+
+use crate::commands::services;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -139,8 +141,14 @@ impl App {
                     Ok(s) => match std::fs::write(&self.config_path, s) {
                         Ok(()) => {
                             self.config = new_config;
+                            let refresh = services::refresh_after_config_change();
                             self.status = Some((
-                                format!("✓  saved to {}", self.config_path.display()),
+                                format!(
+                                    "✓  saved to {} | broker={} watch={}",
+                                    self.config_path.display(),
+                                    refresh.broker.label(),
+                                    refresh.watch.label()
+                                ),
                                 false,
                             ));
                         }
@@ -176,11 +184,6 @@ fn build_sections(cfg: &Config) -> Vec<Section> {
                     value: cfg.camera.device.clone(),
                 },
                 Field {
-                    key: "ir_device",
-                    description: "Optional IR camera path for RGB+IR cross-check",
-                    value: cfg.camera.ir_device.clone().unwrap_or_default(),
-                },
-                Field {
                     key: "width",
                     description: "Capture width in pixels",
                     value: cfg.camera.width.to_string(),
@@ -206,6 +209,71 @@ fn build_sections(cfg: &Config) -> Vec<Section> {
                     value: cfg.camera.warmup_frames.to_string(),
                 },
                 Field {
+                    key: "ir_device",
+                    description: "IR camera device path for cross-check (leave empty to disable)",
+                    value: cfg
+                        .camera
+                        .ir
+                        .as_ref()
+                        .map(|ir| ir.device.clone())
+                        .unwrap_or_default(),
+                },
+                Field {
+                    key: "ir_width",
+                    description: "IR capture width override (blank = inherit RGB width)",
+                    value: cfg
+                        .camera
+                        .ir
+                        .as_ref()
+                        .and_then(|ir| ir.width)
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                },
+                Field {
+                    key: "ir_height",
+                    description: "IR capture height override (blank = inherit)",
+                    value: cfg
+                        .camera
+                        .ir
+                        .as_ref()
+                        .and_then(|ir| ir.height)
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                },
+                Field {
+                    key: "ir_timeout_ms",
+                    description: "IR capture timeout override (blank = max(rgb, 8000))",
+                    value: cfg
+                        .camera
+                        .ir
+                        .as_ref()
+                        .and_then(|ir| ir.timeout_ms)
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                },
+                Field {
+                    key: "ir_warmup_frames",
+                    description: "IR warmup frames override (blank = max(rgb, 10))",
+                    value: cfg
+                        .camera
+                        .ir
+                        .as_ref()
+                        .and_then(|ir| ir.warmup_frames)
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                },
+                Field {
+                    key: "ir_min_face_size",
+                    description: "Minimum IR face size in px (blank = 5/8 of RGB min_face_size)",
+                    value: cfg
+                        .camera
+                        .ir
+                        .as_ref()
+                        .and_then(|ir| ir.min_face_size)
+                        .map(|v| v.to_string())
+                        .unwrap_or_default(),
+                },
+                Field {
                     key: "cross_check_enabled",
                     description: "Require synchronized RGB+IR cross-check (true/false)",
                     value: cfg.camera.cross_check.enabled.to_string(),
@@ -221,9 +289,9 @@ fn build_sections(cfg: &Config) -> Vec<Section> {
                     value: cfg.camera.cross_check.max_position_offset_px.to_string(),
                 },
                 Field {
-                    key: "cross_check_min_identity_similarity",
-                    description: "Minimum RGB/IR ArcFace similarity [0.0 – 1.0]",
-                    value: cfg.camera.cross_check.min_identity_similarity.to_string(),
+                    key: "cross_check_allow_identity_homography",
+                    description: "Allow enabling cross-check with the identity homography (sensors must be pre-aligned)",
+                    value: cfg.camera.cross_check.allow_identity_homography.to_string(),
                 },
             ],
         },
@@ -323,18 +391,33 @@ fn sections_to_config(sections: &[Section], base: &Config) -> anyhow::Result<Con
 
 fn parse_camera(section: &Section, base: &CameraConfig) -> anyhow::Result<CameraConfig> {
     let mut cfg = base.clone();
+    // Start from whatever IR config the operator already had; we only keep it
+    // if the device field is still non-empty after the edit.
+    let mut ir_device: Option<String> = cfg.ir.as_ref().map(|ir| ir.device.clone());
+    let mut ir_width: Option<u32> = cfg.ir.as_ref().and_then(|ir| ir.width);
+    let mut ir_height: Option<u32> = cfg.ir.as_ref().and_then(|ir| ir.height);
+    let mut ir_timeout_ms: Option<u64> = cfg.ir.as_ref().and_then(|ir| ir.timeout_ms);
+    let mut ir_warmup: Option<u32> = cfg.ir.as_ref().and_then(|ir| ir.warmup_frames);
+    let mut ir_min_face_size: Option<u32> = cfg.ir.as_ref().and_then(|ir| ir.min_face_size);
+    let ir_fps: Option<u32> = cfg.ir.as_ref().and_then(|ir| ir.fps);
+
     for f in &section.fields {
         match f.key {
             "device" => cfg.device = f.value.clone(),
-            "ir_device" => {
-                let trimmed = f.value.trim();
-                cfg.ir_device = (!trimmed.is_empty()).then(|| trimmed.to_owned());
-            }
             "width" => cfg.width = parse_u32(&f.value, f.key)?,
             "height" => cfg.height = parse_u32(&f.value, f.key)?,
             "fps" => cfg.fps = parse_u32(&f.value, f.key)?,
             "timeout_ms" => cfg.timeout_ms = parse_u64(&f.value, f.key)?,
             "warmup_frames" => cfg.warmup_frames = parse_u32(&f.value, f.key)?,
+            "ir_device" => {
+                let trimmed = f.value.trim();
+                ir_device = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+            }
+            "ir_width" => ir_width = parse_optional_u32(&f.value, f.key)?,
+            "ir_height" => ir_height = parse_optional_u32(&f.value, f.key)?,
+            "ir_timeout_ms" => ir_timeout_ms = parse_optional_u64(&f.value, f.key)?,
+            "ir_warmup_frames" => ir_warmup = parse_optional_u32(&f.value, f.key)?,
+            "ir_min_face_size" => ir_min_face_size = parse_optional_u32(&f.value, f.key)?,
             "cross_check_enabled" => cfg.cross_check.enabled = parse_bool(&f.value, f.key)?,
             "cross_check_max_time_skew_ms" => {
                 cfg.cross_check.max_time_skew_ms = parse_u64(&f.value, f.key)?
@@ -342,12 +425,21 @@ fn parse_camera(section: &Section, base: &CameraConfig) -> anyhow::Result<Camera
             "cross_check_max_position_offset_px" => {
                 cfg.cross_check.max_position_offset_px = parse_f32(&f.value, f.key)?
             }
-            "cross_check_min_identity_similarity" => {
-                cfg.cross_check.min_identity_similarity = parse_f32(&f.value, f.key)?
+            "cross_check_allow_identity_homography" => {
+                cfg.cross_check.allow_identity_homography = parse_bool(&f.value, f.key)?
             }
             _ => {}
         }
     }
+    cfg.ir = ir_device.map(|device| CameraIrConfig {
+        device,
+        width: ir_width,
+        height: ir_height,
+        fps: ir_fps,
+        timeout_ms: ir_timeout_ms,
+        warmup_frames: ir_warmup,
+        min_face_size: ir_min_face_size,
+    });
     fill_cross_check_defaults(&mut cfg.cross_check);
     Ok(cfg)
 }
@@ -359,9 +451,6 @@ fn fill_cross_check_defaults(cfg: &mut CameraCrossCheckConfig) {
     }
     if cfg.max_position_offset_px == 0.0 {
         cfg.max_position_offset_px = defaults.max_position_offset_px;
-    }
-    if cfg.min_identity_similarity == 0.0 {
-        cfg.min_identity_similarity = defaults.min_identity_similarity;
     }
 }
 
@@ -452,4 +541,20 @@ fn parse_bool(s: &str, key: &str) -> anyhow::Result<bool> {
         "false" => Ok(false),
         other => Err(anyhow!("'{key}' expects true or false, got '{other}'")),
     }
+}
+
+fn parse_optional_u32(s: &str, key: &str) -> anyhow::Result<Option<u32>> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(parse_u32(trimmed, key)?))
+}
+
+fn parse_optional_u64(s: &str, key: &str) -> anyhow::Result<Option<u64>> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(parse_u64(trimmed, key)?))
 }

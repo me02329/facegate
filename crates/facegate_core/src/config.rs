@@ -18,15 +18,62 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CameraConfig {
     pub device: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ir_device: Option<String>,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
     pub timeout_ms: u64,
     pub warmup_frames: u32,
+    /// Secondary IR sensor used for the liveness cross-check. Has its own
+    /// resolution / timeout / warmup defaults because IR modules typically
+    /// stream lower-res GREY and take longer to settle than the colour sensor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ir: Option<CameraIrConfig>,
     #[serde(default)]
     pub cross_check: CameraCrossCheckConfig,
+}
+
+/// IR sensor capture settings. Every override field is optional and falls back
+/// to an IR-friendly default at access time (see `CameraIrConfig::effective_*`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CameraIrConfig {
+    pub device: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warmup_frames: Option<u32>,
+    /// Minimum bounding-box size (px) required to accept an IR face. Defaults
+    /// lower than the RGB `recognition.min_face_size` because IR modules are
+    /// typically lower-resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_face_size: Option<u32>,
+}
+
+impl CameraIrConfig {
+    pub fn effective_width(&self, rgb_default: u32) -> u32 {
+        self.width.unwrap_or(rgb_default)
+    }
+    pub fn effective_height(&self, rgb_default: u32) -> u32 {
+        self.height.unwrap_or(rgb_default)
+    }
+    pub fn effective_fps(&self, rgb_default: u32) -> u32 {
+        self.fps.unwrap_or(rgb_default)
+    }
+    pub fn effective_timeout_ms(&self, rgb_default: u64) -> u64 {
+        self.timeout_ms.unwrap_or(rgb_default.max(8000))
+    }
+    pub fn effective_warmup_frames(&self, rgb_default: u32) -> u32 {
+        self.warmup_frames.unwrap_or(rgb_default.max(10))
+    }
+    pub fn effective_min_face_size(&self, rgb_default: u32) -> u32 {
+        self.min_face_size
+            .unwrap_or_else(|| rgb_default.saturating_mul(5) / 8)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -37,8 +84,6 @@ pub struct CameraCrossCheckConfig {
     pub max_time_skew_ms: u64,
     #[serde(default = "default_cross_check_max_position_offset_px")]
     pub max_position_offset_px: f32,
-    #[serde(default = "default_cross_check_min_identity_similarity")]
-    pub min_identity_similarity: f32,
     /// 3x3 projective homography mapping IR pixel coordinates into RGB pixel
     /// coordinates, stored **row-major**:
     /// `[a, b, tx, c, d, ty, g, h, 1]` corresponds to
@@ -48,12 +93,19 @@ pub struct CameraCrossCheckConfig {
     ///     [ g  h   1 ]
     /// ```
     /// The broker applies this to the IR landmark centroid before comparing
-    /// against the RGB centroid. The default is the identity matrix, which is
-    /// only correct when the two sensors are already pixel-aligned — real
-    /// laptops with an IR module physically offset from the RGB camera need
-    /// per-device calibration.
+    /// against the RGB centroid. The default is the identity matrix; enabling
+    /// cross-check while this is still the identity is refused at validation
+    /// time unless `allow_identity_homography = true` (used only for
+    /// pre-aligned sensors / tests).
     #[serde(default = "default_cross_check_homography")]
     pub homography: [f32; 9],
+    /// Escape hatch for setups where the IR and RGB sensors are already
+    /// pixel-aligned (rare on consumer laptops) or for tests. Without it,
+    /// `validate()` refuses to enable cross-check while `homography` is still
+    /// the identity matrix — most users need to run `facegate calibrate-cameras`
+    /// first.
+    #[serde(default)]
+    pub allow_identity_homography: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -107,12 +159,15 @@ fn default_cross_check_max_position_offset_px() -> f32 {
     40.0
 }
 
-fn default_cross_check_min_identity_similarity() -> f32 {
-    0.55
-}
-
 fn default_cross_check_homography() -> [f32; 9] {
     [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+}
+
+pub fn is_identity_homography(h: &[f32; 9]) -> bool {
+    const IDENTITY: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    h.iter()
+        .zip(IDENTITY.iter())
+        .all(|(a, b)| (a - b).abs() < 1e-6)
 }
 
 impl Default for CameraCrossCheckConfig {
@@ -121,8 +176,8 @@ impl Default for CameraCrossCheckConfig {
             enabled: false,
             max_time_skew_ms: default_cross_check_max_time_skew_ms(),
             max_position_offset_px: default_cross_check_max_position_offset_px(),
-            min_identity_similarity: default_cross_check_min_identity_similarity(),
             homography: default_cross_check_homography(),
+            allow_identity_homography: false,
         }
     }
 }
@@ -132,12 +187,12 @@ impl Default for Config {
         Config {
             camera: CameraConfig {
                 device: "/dev/video0".to_string(),
-                ir_device: None,
                 width: 640,
                 height: 360,
                 fps: 30,
                 timeout_ms: 5000,
                 warmup_frames: 3,
+                ir: None,
                 cross_check: CameraCrossCheckConfig::default(),
             },
             recognition: RecognitionConfig {
@@ -192,15 +247,35 @@ impl Config {
                 "camera.device cannot be empty".to_string(),
             ));
         }
-        if let Some(ir_device) = &self.camera.ir_device {
-            if ir_device.trim().is_empty() {
+        if let Some(ir) = &self.camera.ir {
+            if ir.device.trim().is_empty() {
                 return Err(FaceRsError::Config(
-                    "camera.ir_device cannot be empty when set".to_string(),
+                    "camera.ir.device cannot be empty when set".to_string(),
                 ));
             }
-            if ir_device == &self.camera.device {
+            if ir.device == self.camera.device {
                 return Err(FaceRsError::Config(
-                    "camera.ir_device must be different from camera.device".to_string(),
+                    "camera.ir.device must be different from camera.device".to_string(),
+                ));
+            }
+            if ir.width == Some(0) || ir.height == Some(0) {
+                return Err(FaceRsError::Config(
+                    "camera.ir width/height must be greater than zero".to_string(),
+                ));
+            }
+            if ir.fps == Some(0) {
+                return Err(FaceRsError::Config(
+                    "camera.ir.fps must be greater than zero".to_string(),
+                ));
+            }
+            if ir.timeout_ms == Some(0) {
+                return Err(FaceRsError::Config(
+                    "camera.ir.timeout_ms must be greater than zero".to_string(),
+                ));
+            }
+            if ir.min_face_size == Some(0) {
+                return Err(FaceRsError::Config(
+                    "camera.ir.min_face_size must be greater than zero".to_string(),
                 ));
             }
         }
@@ -219,9 +294,9 @@ impl Config {
                 "camera.timeout_ms must be greater than zero".to_string(),
             ));
         }
-        if self.camera.cross_check.enabled && self.camera.ir_device.is_none() {
+        if self.camera.cross_check.enabled && self.camera.ir.is_none() {
             return Err(FaceRsError::Config(
-                "camera.cross_check.enabled requires camera.ir_device".to_string(),
+                "camera.cross_check.enabled requires a [camera.ir] section".to_string(),
             ));
         }
         if self.camera.cross_check.max_time_skew_ms == 0 {
@@ -237,14 +312,6 @@ impl Config {
                     .to_string(),
             ));
         }
-        if !self.camera.cross_check.min_identity_similarity.is_finite()
-            || !(0.0..=1.0).contains(&self.camera.cross_check.min_identity_similarity)
-        {
-            return Err(FaceRsError::Config(
-                "camera.cross_check.min_identity_similarity must be a finite value between 0.0 and 1.0"
-                    .to_string(),
-            ));
-        }
         if !self
             .camera
             .cross_check
@@ -254,6 +321,17 @@ impl Config {
         {
             return Err(FaceRsError::Config(
                 "camera.cross_check.homography must contain only finite values".to_string(),
+            ));
+        }
+        if self.camera.cross_check.enabled
+            && is_identity_homography(&self.camera.cross_check.homography)
+            && !self.camera.cross_check.allow_identity_homography
+        {
+            return Err(FaceRsError::Config(
+                "camera.cross_check.enabled is true but homography is still the identity matrix; \
+                 run `facegate calibrate-cameras --write` first, or set \
+                 camera.cross_check.allow_identity_homography = true if the sensors are physically aligned"
+                    .to_string(),
             ));
         }
         if !self.recognition.threshold.is_finite()
@@ -325,7 +403,7 @@ mod tests {
     fn default_config_is_valid() {
         let cfg = Config::default();
         assert_eq!(cfg.camera.device, "/dev/video0");
-        assert!(cfg.camera.ir_device.is_none());
+        assert!(cfg.camera.ir.is_none());
         assert!(!cfg.camera.cross_check.enabled);
         assert!(cfg.recognition.threshold > 0.0 && cfg.recognition.threshold < 1.0);
         assert!(cfg.security.allow_password_fallback);
@@ -340,7 +418,7 @@ mod tests {
         let serialized = toml::to_string(&cfg).expect("serialize");
         let deserialized: Config = toml::from_str(&serialized).expect("deserialize");
         assert_eq!(cfg.camera.device, deserialized.camera.device);
-        assert_eq!(cfg.camera.ir_device, deserialized.camera.ir_device);
+        assert_eq!(cfg.camera.ir.is_some(), deserialized.camera.ir.is_some());
         assert_eq!(
             cfg.recognition.threshold,
             deserialized.recognition.threshold
@@ -364,26 +442,63 @@ mod tests {
     }
 
     #[test]
-    fn rejects_enabled_cross_check_without_ir_device() {
+    fn rejects_enabled_cross_check_without_ir_section() {
         let mut cfg = Config::default();
         cfg.camera.cross_check.enabled = true;
+        cfg.camera.cross_check.allow_identity_homography = true;
         assert!(cfg.validate().is_err());
-        cfg.camera.ir_device = Some("/dev/video2".to_owned());
+        cfg.camera.ir = Some(CameraIrConfig {
+            device: "/dev/video2".to_owned(),
+            width: None,
+            height: None,
+            fps: None,
+            timeout_ms: None,
+            warmup_frames: None,
+            min_face_size: None,
+        });
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_identity_homography_when_cross_check_enabled() {
+        let mut cfg = Config::default();
+        cfg.camera.ir = Some(CameraIrConfig {
+            device: "/dev/video2".to_owned(),
+            width: None,
+            height: None,
+            fps: None,
+            timeout_ms: None,
+            warmup_frames: None,
+            min_face_size: None,
+        });
+        cfg.camera.cross_check.enabled = true;
+        // identity homography → refused unless the operator opts in
+        assert!(cfg.validate().is_err());
+        cfg.camera.cross_check.allow_identity_homography = true;
         assert!(cfg.validate().is_ok());
     }
 
     #[test]
     fn rejects_invalid_cross_check_values() {
         let mut cfg = Config::default();
-        cfg.camera.ir_device = Some("/dev/video2".to_owned());
+        cfg.camera.ir = Some(CameraIrConfig {
+            device: "/dev/video2".to_owned(),
+            width: None,
+            height: None,
+            fps: None,
+            timeout_ms: None,
+            warmup_frames: None,
+            min_face_size: None,
+        });
         cfg.camera.cross_check.enabled = true;
+        cfg.camera.cross_check.allow_identity_homography = true;
         cfg.camera.cross_check.max_time_skew_ms = 0;
         assert!(cfg.validate().is_err());
         cfg.camera.cross_check.max_time_skew_ms = 50;
         cfg.camera.cross_check.max_position_offset_px = f32::NAN;
         assert!(cfg.validate().is_err());
         cfg.camera.cross_check.max_position_offset_px = 40.0;
-        cfg.camera.cross_check.min_identity_similarity = 1.5;
+        cfg.camera.cross_check.homography[8] = f32::NAN;
         assert!(cfg.validate().is_err());
     }
 

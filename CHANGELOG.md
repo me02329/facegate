@@ -27,10 +27,35 @@ emergency PAM rollback, liveness PAD groundwork) are still open.
   Makefiles — Markdown keeps its trailing whitespace to preserve
   two-space line breaks (#44).
 - Optional RGB+IR dual-stream cross-check for auth/watch paths. When
-  `[camera.cross_check].enabled = true` and `camera.ir_device` is set,
-  clients submit a synchronized `MatchFramePair`; the broker rejects
-  probes whose timestamps, mapped landmark positions, or cross-stream
-  identities disagree (#28).
+  `[camera.cross_check].enabled = true` and a `[camera.ir]` section is
+  set, clients submit a synchronized `MatchFramePair`; the broker
+  rejects probes whose capture timestamps disagree, whose RGB or IR
+  streams do not contain exactly one face, or whose mapped landmark
+  positions are too far apart. The IR stream is used as a **liveness
+  signal** (face presence + spatial alignment), not for cross-modal
+  identity matching — ArcFace is trained on RGB faces and produces
+  meaningless similarities against IR crops, which would otherwise
+  reject every genuine user and fail harder in low light (#28).
+- `facegate calibrate-cameras`, which captures RGB+IR landmark pairs
+  in parallel scoped threads, estimates the IR→RGB homography, reports
+  reprojection error, and can write the cross-check calibration back to
+  the config (#28).
+- Camera frames now carry their `captured_at_ms` timestamp stamped
+  inside `V4lCamera::capture_frame` (right after `stream.next()`)
+  rather than at IPC submission time, so the broker's
+  `max_time_skew_ms` window measures real RGB↔IR capture skew.
+- Dedicated `[camera.ir]` config section with per-IR overrides for
+  `width`, `height`, `fps`, `timeout_ms`, `warmup_frames`, and
+  `min_face_size`, all optional with IR-friendly defaults (longer
+  warmup/timeout, 5/8× the RGB min face size).
+- Per-user diagnostic log at `~/.local/state/facegate/facegate.log`, plus
+  `facegate logs`, to help users debug camera failures, timeouts,
+  cross-check rejects, broker errors, and accept/reject outcomes without
+  reading root-owned system logs.
+- Automatic service refresh after config writes: `configure`, `setup`,
+  `calibrate --write`, and `calibrate-cameras --write` now start/restart
+  `facegate-brokerd.service` and restart the user's `facegate-watch`
+  service if it is active, so config changes apply immediately.
 
 ### Changed
 
@@ -74,8 +99,14 @@ emergency PAM rollback, liveness PAD groundwork) are still open.
   the repo root, backup files left by `session-auth` (`*.bak`,
   `*.orig`, `*~`), local logs and `/tmp/` scratch, and common
   OS / editor noise (#45).
-- **IPC protocol bumped to v3** to add `MatchFramePair` and per-frame
-  capture timestamps for RGB+IR cross-check (#28).
+- **IPC protocol bumped to v5** (was v3 in the previous Unreleased
+  drop): `MatchFramePair` carries server-meaningful per-frame capture
+  timestamps and the `cross_check_identity_mismatch` reason is removed
+  (the broker no longer runs ArcFace on the IR crop). `min_identity_similarity`
+  is removed from `[camera.cross_check]`; `camera.ir_device` (string) is
+  replaced by a dedicated `[camera.ir]` section. Cross-check enabled with
+  the identity homography is refused at config validation unless
+  `camera.cross_check.allow_identity_homography = true` (#28).
 
 ### Fixed
 

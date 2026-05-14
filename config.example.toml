@@ -3,10 +3,12 @@
 # hardware you have *two* devices: a normal RGB webcam (typically /dev/video0)
 # and an IR / depth sensor (often /dev/video2 or /dev/video4). Both work for
 # enrollment and recognition. For the stronger Windows-Hello-style path, set
-# device to RGB and ir_device to the IR stream, then enable cross_check below:
+# device to RGB and add a [camera.ir] section with device pointing at the IR
+# stream, then enable cross_check below:
 #
-#   - it works in the dark, so screen-unlock keeps working at night;
-#   - it's much harder to spoof with a printed photo than an RGB feed.
+#   - the IR sensor proves a real face is present (a flat photo doesn't have
+#     the right thermal/IR reflectance), independently of the RGB match;
+#   - it's harder to spoof with a printed photo than an RGB feed alone.
 #
 # To find which device is which:
 #   sudo facegate cameras                 # lists all /dev/video* with format
@@ -16,31 +18,51 @@
 # Devices reporting GREY / Y8 / Y800 are the IR streams. Devices reporting
 # only YUYV / MJPG are RGB.
 device = "/dev/video0"
-# ir_device = "/dev/video2"
 width = 640
 height = 360
 fps = 30
 timeout_ms = 5000
 warmup_frames = 3
 
+# [camera.ir]
+# # IR sensor used as a liveness signal for the cross-check. The broker runs
+# # SCRFD on this stream to confirm a real face is present and at the right
+# # position relative to the RGB face; it does *not* run ArcFace identity on
+# # this stream, so no cross-modal embedding comparison is required.
+# device = "/dev/video2"
+# # Every override below is optional — when blank we use IR-friendly defaults
+# # (longer warmup/timeout, lower min_face_size) so a lower-resolution IR module
+# # still detects a face reliably.
+# # width = 480
+# # height = 480
+# # fps = 30
+# # timeout_ms = 8000        # IR sensors often take longer to deliver frames
+# # warmup_frames = 10       # let the IR illuminator and AE settle
+# # min_face_size = 50       # IR is typically lower-res than the RGB camera
+
 [camera.cross_check]
-# When enabled, auth uses a synchronized RGB+IR pair and the broker rejects
-# probes whose timestamps, face positions, or RGB/IR identities disagree.
-# Requires camera.ir_device. Leave disabled on single-camera systems.
+# When enabled, auth uses a synchronized RGB+IR pair: the broker checks that
+# both streams see exactly one face, that they're captured close in time, and
+# that the IR face maps via `homography` to the RGB face position. Identity
+# matching happens on the RGB embedding only — the IR check is liveness, not
+# recognition. Requires a [camera.ir] section. Leave disabled on single-camera
+# systems.
 enabled = false
 max_time_skew_ms = 50
 max_position_offset_px = 40.0
-min_identity_similarity = 0.55
 # Homography mapping IR landmark coordinates into RGB pixel coordinates.
 # Stored row-major: [a, b, tx, c, d, ty, g, h, 1] for
 #     [ a  b  tx ]
 #     [ c  d  ty ]
 #     [ g  h   1 ]
-# Identity is a safe default only when the two sensors are already pixel-
-# aligned; real laptops with an IR module physically offset from the RGB
-# camera need per-device calibration. A calibration helper is tracked as a
-# follow-up in docs/security-issues/09-dual-camera-cross-check.md.
+# The default identity matrix only works if the two sensors are physically
+# pre-aligned (rare on consumer laptops). Run:
+#   sudo facegate calibrate-cameras --write --enable
+# on real hardware to compute the right homography and enable cross-check.
+# Validation refuses `enabled = true` with the identity matrix unless
+# `allow_identity_homography = true` is also set.
 homography = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+allow_identity_homography = false
 
 [recognition]
 threshold = 0.55

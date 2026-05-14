@@ -10,7 +10,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 pub const DEFAULT_SOCKET_PATH: &str = "/run/facegate/broker.sock";
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 /// Upper bound on the size of a request line accepted by the broker. Frames
 /// dominate this budget — a single 1920x1080 RGB frame after base64 is roughly
@@ -48,6 +48,30 @@ pub struct MatchResult {
     pub matched: bool,
     pub score: Option<f32>,
     pub template_id: Option<u32>,
+    #[serde(default = "default_match_reason")]
+    pub reason: MatchReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchReason {
+    Matched,
+    TemplateMismatch,
+    NotEnrolled,
+    NoFace,
+    MultipleFaces,
+    CrossCheckRequired,
+    CrossCheckTimeSkew,
+    CrossCheckRgbNoFace,
+    CrossCheckRgbMultipleFaces,
+    CrossCheckIrNoFace,
+    CrossCheckIrMultipleFaces,
+    CrossCheckPositionMismatch,
+    Internal,
+}
+
+fn default_match_reason() -> MatchReason {
+    MatchReason::Internal
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -172,20 +172,13 @@ pub fn run_streaming(
         Some("run: facegate cameras  (no root needed) to find the right device"),
     );
     if config.camera.cross_check.enabled {
-        let ir_ok = config
-            .camera
-            .ir_device
-            .as_deref()
-            .map(|device| Path::new(device).exists())
-            .unwrap_or(false);
+        let ir_device: Option<&str> = config.camera.ir.as_ref().map(|ir| ir.device.as_str());
+        let ir_ok = ir_device.map(|d| Path::new(d).exists()).unwrap_or(false);
         all_ok &= chk(
             tx,
-            &format!(
-                "IR camera device ({})",
-                config.camera.ir_device.as_deref().unwrap_or("<missing>")
-            ),
+            &format!("IR camera device ({})", ir_device.unwrap_or("<missing>")),
             ir_ok,
-            Some("set [camera].ir_device to the IR / GREY camera, or disable [camera.cross_check]"),
+            Some("set [camera.ir].device to the IR / GREY camera, or disable [camera.cross_check]"),
         );
     }
 

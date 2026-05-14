@@ -348,6 +348,7 @@ systemctl --user enable --now facegate-watch
 | `configure` | Edit settings in a terminal UI |
 | `setup [USERNAME]` | Guided first-time setup flow (camera → enrol → PAM wiring) |
 | `status` | Compact installation, broker reachability, and enrolment summary (also shows recent audit events) |
+| `logs [--lines N]` | Show the current user's local diagnostic log |
 | `doctor` | Check installation status |
 | `cameras` | List `/dev/video*` and flag IR vs RGB |
 | `camera-test [--device DEV]` | Test camera and face detection |
@@ -356,13 +357,20 @@ systemctl --user enable --now facegate-watch
 | `remove USERNAME ID` | Remove a template by ID (via the broker) |
 | `test USERNAME [--for sudo\|session\|all]` | Live recognition test |
 | `calibrate USERNAME [--for sudo\|session] [--samples N] [--write]` | Recommend a recognition threshold from live positive samples; `--write` offers to save it to the config |
+| `calibrate-cameras [--rgb-device DEV] [--ir-device DEV] [--samples N] [--write] [--enable]` | Estimate the IR→RGB homography for dual-stream cross-check |
 | `session-auth` | Toggle face auth in login/session PAM services |
 | `completions SHELL` | Print shell completion script |
 
 All commands except `completions`, `cameras`, `status`, and the internal
-`watch`/`auth` helpers require root. `cameras`, `status`, and `watch` run as
+`watch`/`auth` helpers require root. `cameras`, `status`, `logs`, and `watch` run as
 the normal user. All template reads/writes and all match decisions
 ultimately go through `facegate-brokerd` over `/run/facegate/broker.sock`.
+
+Facegate also writes a user-readable diagnostic log at
+`~/.local/state/facegate/facegate.log`. It records coarse local events such as
+camera errors, timeouts, cross-check rejects, match scores, and accept/reject
+outcomes. It does not contain frames or embeddings. Use `facegate logs` to view
+recent lines.
 
 ---
 
@@ -373,19 +381,23 @@ ultimately go through `facegate-brokerd` over `/run/facegate/broker.sock`.
 ```toml
 [camera]
 device = "/dev/video0"
-# ir_device = "/dev/video2"  # optional IR stream for RGB+IR cross-check
 width = 640
 height = 480
 fps = 30
 timeout_ms = 5000
 warmup_frames = 5
 
+# [camera.ir]
+# device = "/dev/video2"      # IR sensor for RGB+IR cross-check
+# # All other fields optional; blank = IR-friendly defaults
+# # min_face_size = 50
+
 [camera.cross_check]
 enabled = false
 max_time_skew_ms = 50
 max_position_offset_px = 40.0
-min_identity_similarity = 0.55
 homography = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+allow_identity_homography = false   # refuse identity matrix unless explicit
 
 [recognition]
 threshold = 0.55        # cosine similarity threshold (higher = stricter)
@@ -415,13 +427,25 @@ The `[security].cooldown_after_failures` / `cooldown_seconds` knobs are
 enforced server-side by the broker, per-peer-UID and per-username, so a
 hostile client cannot bypass the lockout by reconnecting.
 
-When `[camera.cross_check].enabled = true`, `camera.ir_device` must be
-configured. Auth clients capture both the primary RGB stream and the IR
-stream, then submit a `MatchFramePair` to the broker. The broker rejects the
-probe unless the pair is timestamp-synchronized, each stream contains exactly
-one face, the mapped RGB/IR landmark centroids are close, and the two
-embeddings are similar enough. Single-camera systems should leave this
-disabled.
+When `[camera.cross_check].enabled = true`, a `[camera.ir]` section must be
+configured. Auth clients capture the RGB and IR streams in parallel and
+submit a `MatchFramePair` to the broker. The broker rejects the probe unless
+the pair is timestamp-synchronized within `max_time_skew_ms`, each stream
+contains exactly one face, and the IR face maps via `homography` to within
+`max_position_offset_px` of the RGB face. The IR check is a **liveness**
+signal (proves a real face is present and aligned); identity matching is done
+on the RGB embedding alone. Single-camera systems should leave this disabled.
+
+Use `sudo facegate calibrate-cameras --ir-device /dev/video2 --write` to
+estimate and write the `homography` from live RGB+IR landmark pairs. Add
+`--enable` only after testing the resulting config with `sudo facegate test
+<USER>`.
+
+Whenever Facegate writes `/etc/facegate/config.toml` through `configure`,
+`setup`, `calibrate --write`, or `calibrate-cameras --write`, it refreshes
+services automatically: the broker is restarted/started so it reads the new
+thresholds, model paths, storage path, and cross-check policy, and the
+per-user `facegate-watch` daemon is restarted if it is currently active.
 
 You can also use `facegate calibrate <USER> --write` to compute a
 threshold from real positive samples rather than guessing at

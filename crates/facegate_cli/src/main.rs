@@ -25,6 +25,12 @@ enum Command {
     Configure,
     /// Print a compact installation and enrollment summary
     Status,
+    /// Show the current user's Facegate diagnostic log
+    Logs {
+        /// Number of recent log lines to print
+        #[arg(long, default_value_t = 80)]
+        lines: usize,
+    },
     /// Guided first-time setup flow
     Setup {
         /// User to enroll; defaults to SUDO_USER or USER
@@ -79,6 +85,24 @@ enum Command {
         /// Offer to write the recommended threshold to the config
         #[arg(long)]
         write: bool,
+    },
+    /// Calibrate RGB+IR camera alignment for dual-stream cross-check
+    CalibrateCameras {
+        /// Override the primary RGB camera device (defaults to camera.device)
+        #[arg(long)]
+        rgb_device: Option<String>,
+        /// Override the IR camera device (defaults to camera.ir.device)
+        #[arg(long)]
+        ir_device: Option<String>,
+        /// Number of accepted RGB+IR pairs to collect
+        #[arg(long, default_value_t = 5)]
+        samples: u32,
+        /// Offer to write camera.device, [camera.ir].device, and homography to the config
+        #[arg(long)]
+        write: bool,
+        /// Also enable [camera.cross_check] when writing the config
+        #[arg(long)]
+        enable: bool,
     },
     /// Authenticate a user — used internally by the PAM module
     #[command(hide = true)]
@@ -153,6 +177,7 @@ fn main() {
     let auth_mode = matches!(&cli.command, Some(Command::Auth { .. }));
     let watch_mode = matches!(&cli.command, Some(Command::Watch));
     let status_mode = matches!(&cli.command, Some(Command::Status));
+    let logs_mode = matches!(&cli.command, Some(Command::Logs { .. }));
     // `cameras` only opens /dev/video* in read-only-ish ways; it should be
     // runnable as a normal user so people can discover their IR camera before
     // running anything privileged.
@@ -168,10 +193,10 @@ fn main() {
         return;
     }
 
-    // Auth, watch, status, and the read-only `cameras` listing run as an
+    // Auth, watch, status, logs, and the read-only `cameras` listing run as an
     // unprivileged user. Every other command touches sensitive face data or
     // system config, so we require root.
-    if !auth_mode && !watch_mode && !status_mode && !cameras_mode {
+    if !auth_mode && !watch_mode && !status_mode && !logs_mode && !cameras_mode {
         // SAFETY: geteuid() is always safe to call.
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("Error: facegate must be run as root (e.g. sudo facegate).");
@@ -281,6 +306,7 @@ fn run_command(
     match cmd {
         Command::Configure => commands::configure::run(config, config_path),
         Command::Status => commands::status::run(&config, &config_path),
+        Command::Logs { lines } => commands::user_log::run(lines),
         Command::Setup { username } => commands::setup::run(config, config_path, username),
         Command::Doctor => commands::doctor::run(&config),
         Command::CameraTest { device } => commands::camera_test::run(&config, device.as_deref()),
@@ -315,6 +341,21 @@ fn run_command(
             purpose.into(),
             samples,
             write,
+        ),
+        Command::CalibrateCameras {
+            rgb_device,
+            ir_device,
+            samples,
+            write,
+            enable,
+        } => commands::calibrate_cameras::run(
+            config,
+            config_path,
+            rgb_device.as_deref(),
+            ir_device.as_deref(),
+            samples,
+            write,
+            enable,
         ),
         Command::Auth { user, service } => {
             std::process::exit(commands::auth::run(&config, &user, service.as_deref()) as i32);

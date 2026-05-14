@@ -6,7 +6,7 @@ use facegate_core::config::Config;
 use facegate_core::pipeline::FacePipeline;
 use facegate_core::storage::AuthScope;
 
-use crate::commands::broker;
+use crate::commands::{broker, services};
 
 const DEFAULT_MARGIN: f32 = 0.05;
 const MIN_RECOMMENDED_THRESHOLD: f32 = 0.30;
@@ -93,6 +93,7 @@ pub fn run(
             config.recognition.threshold = stats.recommended;
             write_config(&config_path, &config)?;
             println!("Config updated.");
+            services::print_refresh_summary(&services::refresh_after_config_change());
         } else {
             println!("Config unchanged.");
         }

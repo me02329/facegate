@@ -1,6 +1,8 @@
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 
+use crate::commands::services::RefreshState;
+
 const SERVICE: &str = "facegate-watch";
 
 /// Returns `(username, uid)` for the user who invoked sudo, or `None` if not
@@ -84,6 +86,23 @@ pub fn is_active() -> bool {
         return false;
     };
     systemctl_user(&user, uid, &["is-active", "--quiet", SERVICE])
+}
+
+pub fn restart_if_active() -> RefreshState {
+    if !is_installed() {
+        return RefreshState::NotRunning;
+    }
+    let Some((user, uid)) = real_user() else {
+        return RefreshState::NotRunning;
+    };
+    if !systemctl_user(&user, uid, &["is-active", "--quiet", SERVICE]) {
+        return RefreshState::NotRunning;
+    }
+    if systemctl_user(&user, uid, &["restart", SERVICE]) {
+        RefreshState::Restarted
+    } else {
+        RefreshState::Failed
+    }
 }
 
 /// Returns `true` if the service unit file is installed at either the
