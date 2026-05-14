@@ -7,14 +7,16 @@ on a best-effort basis while the IPC protocol stabilises.
 
 ## [Unreleased]
 
-Work targeting **v0.3.0**. This release focuses on operator tooling
-(broker subcommands, emergency disable, admin user list), per-scope
-recognition policy as a first step toward full per-context auth
-(#8), an RGB+IR cross-check used as a liveness *signal* (not a full
-PAD model — that work continues in #25), and the contributor /
-security disclosure documentation set
-(`CONTRIBUTING.md`, `SECURITY.md`, `docs/ipc-protocol.md`,
-`docs/threat-model.md`, `docs/recovery.md`).
+## [0.3.0] — 2026-05-14
+
+This release focuses on operator tooling (broker subcommands,
+emergency disable, admin user list), per-scope recognition policy
+as a first step toward full per-context auth (#8), an RGB+IR
+cross-check used as a liveness *signal* (not a full PAD model —
+that work continues in #25), and the contributor / security
+disclosure documentation set (`CONTRIBUTING.md`, `SECURITY.md`,
+`docs/ipc-protocol.md`, `docs/threat-model.md`,
+`docs/recovery.md`).
 
 ### Added
 
