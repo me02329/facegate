@@ -7,11 +7,14 @@ on a best-effort basis while the IPC protocol stabilises.
 
 ## [Unreleased]
 
-In-progress work targeting **v0.3.0**. Focus so far: packaging
-reliability, install-time correctness, contributor ergonomics, and a
-documented security disclosure channel. The bigger features tracked
-for this release (broker subcommands and liveness PAD groundwork) are
-still open.
+Work targeting **v0.3.0**. This release focuses on operator tooling
+(broker subcommands, emergency disable, admin user list), per-scope
+recognition policy as a first step toward full per-context auth
+(#8), an RGB+IR cross-check used as a liveness *signal* (not a full
+PAD model — that work continues in #25), and the contributor /
+security disclosure documentation set
+(`CONTRIBUTING.md`, `SECURITY.md`, `docs/ipc-protocol.md`,
+`docs/threat-model.md`, `docs/recovery.md`).
 
 ### Added
 
@@ -39,7 +42,7 @@ still open.
   `[recognition.session]`, with stricter sudo defaults
   (`threshold=0.60`, `required_matches=2`, `max_attempts=5`) while keeping
   session unlock convenience defaults. Calibration writes the selected
-  scope's threshold override (#27).
+  scope's threshold override (#27, first step toward #8).
 - `SECURITY.md` with a supported-versions table, a private disclosure
   channel (GitHub private vulnerability reporting + email fallback),
   acknowledgement / triage / disclosure windows (7 / 14 / 90 days),
