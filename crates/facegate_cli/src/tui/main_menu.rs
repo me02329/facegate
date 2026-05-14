@@ -52,6 +52,8 @@ pub fn run(config: &Config, config_path: &std::path::Path) -> Result<bool> {
 #[derive(Clone, Debug, PartialEq)]
 enum Action {
     Configure,
+    Status,
+    Logs,
     Doctor,
     SudoToggle,
     SessionToggle,
@@ -63,7 +65,17 @@ enum Action {
     AddSession,
     AddBoth,
     List,
+    Forget,
     Test,
+    Calibrate,
+    CalibrateSudo,
+    CalibrateSession,
+    Broker,
+    BrokerHealth,
+    BrokerRestart,
+    BrokerLogs,
+    BrokerRepairPermissions,
+    EmergencyDisable,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -178,6 +190,22 @@ fn build_items(sudo_enabled: bool, session_enabled: bool, watch_active: bool) ->
             needs_user: true,
             kind: ItemKind::Action,
         },
+        MenuItem {
+            icon: "≈ ",
+            label: "Calibrate Threshold",
+            description: "Capture positives and recommend per-scope thresholds".into(),
+            action: Some(Action::Calibrate),
+            needs_user: true,
+            kind: ItemKind::Action,
+        },
+        MenuItem {
+            icon: "- ",
+            label: "Forget User",
+            description: "Delete all templates for one user".into(),
+            action: Some(Action::Forget),
+            needs_user: true,
+            kind: ItemKind::Action,
+        },
         section("Hardware"),
         MenuItem {
             icon: "▤ ",
@@ -197,10 +225,74 @@ fn build_items(sudo_enabled: bool, session_enabled: bool, watch_active: bool) ->
         },
         section("System"),
         MenuItem {
+            icon: "# ",
+            label: "Status",
+            description: "Installation, broker, auth, and watch summary".into(),
+            action: Some(Action::Status),
+            needs_user: false,
+            kind: ItemKind::Action,
+        },
+        MenuItem {
+            icon: "≡ ",
+            label: "Logs",
+            description: "Show recent Facegate user diagnostic log lines".into(),
+            action: Some(Action::Logs),
+            needs_user: false,
+            kind: ItemKind::Action,
+        },
+        MenuItem {
+            icon: "◇ ",
+            label: "Broker",
+            description: "Show broker service, socket, audit, and storage status".into(),
+            action: Some(Action::Broker),
+            needs_user: false,
+            kind: ItemKind::Action,
+        },
+        MenuItem {
+            icon: "◆ ",
+            label: "Broker Health",
+            description: "Ping broker IPC and check configured model files".into(),
+            action: Some(Action::BrokerHealth),
+            needs_user: false,
+            kind: ItemKind::Action,
+        },
+        MenuItem {
+            icon: "↻ ",
+            label: "Broker Restart",
+            description: "Restart facegate-brokerd.service".into(),
+            action: Some(Action::BrokerRestart),
+            needs_user: false,
+            kind: ItemKind::Action,
+        },
+        MenuItem {
+            icon: "≣ ",
+            label: "Broker Logs",
+            description: "Show recent broker journal lines".into(),
+            action: Some(Action::BrokerLogs),
+            needs_user: false,
+            kind: ItemKind::Action,
+        },
+        MenuItem {
+            icon: "◇ ",
+            label: "Repair Broker Perms",
+            description: "Re-apply private ownership on broker storage".into(),
+            action: Some(Action::BrokerRepairPermissions),
+            needs_user: false,
+            kind: ItemKind::Action,
+        },
+        MenuItem {
             icon: "✓ ",
             label: "Doctor",
             description: "Verify libs, PAM config & model files".into(),
             action: Some(Action::Doctor),
+            needs_user: false,
+            kind: ItemKind::Action,
+        },
+        MenuItem {
+            icon: "! ",
+            label: "Emergency Disable",
+            description: "Restore PAM recovery and stop Facegate services".into(),
+            action: Some(Action::EmergencyDisable),
             needs_user: false,
             kind: ItemKind::Action,
         },
@@ -248,8 +340,13 @@ enum InputMode {
     SampleCountInput,
     PamServiceInput,
     EnrollTargetSelect,
+    CalibrationTargetSelect,
     SessionServiceSelect,
     TemplateList,
+    EmergencyConfirm,
+    ForgetConfirm,
+    BrokerRestartConfirm,
+    BrokerRepairConfirm,
 }
 
 enum PanelState {
@@ -281,6 +378,9 @@ struct App<'a> {
     enroll_sudo: bool,
     enroll_session: bool,
     enroll_cursor: usize,
+    calibrate_sudo: bool,
+    calibrate_session: bool,
+    calibrate_cursor: usize,
     session_entries: Vec<SessionEntry>,
     session_cursor: usize,
     template_username: String,
@@ -321,6 +421,9 @@ impl<'a> App<'a> {
             enroll_sudo: true,
             enroll_session: false,
             enroll_cursor: 0,
+            calibrate_sudo: false,
+            calibrate_session: true,
+            calibrate_cursor: 0,
             session_entries: Vec::new(),
             session_cursor: 0,
             template_username: String::new(),
@@ -397,6 +500,21 @@ impl<'a> App<'a> {
                 }
                 return;
             }
+            if action == Action::EmergencyDisable {
+                self.pending = Some(action);
+                self.input_mode = InputMode::EmergencyConfirm;
+                return;
+            }
+            if action == Action::BrokerRestart {
+                self.pending = Some(action);
+                self.input_mode = InputMode::BrokerRestartConfirm;
+                return;
+            }
+            if action == Action::BrokerRepairPermissions {
+                self.pending = Some(action);
+                self.input_mode = InputMode::BrokerRepairConfirm;
+                return;
+            }
             if self.items[self.selected].needs_user {
                 self.pending = Some(action);
                 self.username_buf.clear();
@@ -426,6 +544,16 @@ impl<'a> App<'a> {
                 self.pending_username = Some(name);
                 self.sample_count_buf = "3".to_owned();
                 self.input_mode = InputMode::SampleCountInput;
+            } else if action == Action::Forget {
+                self.pending_username = Some(name);
+                self.username_buf.clear();
+                self.input_mode = InputMode::ForgetConfirm;
+            } else if action == Action::Calibrate {
+                self.pending_username = Some(name);
+                self.calibrate_sudo = false;
+                self.calibrate_session = true;
+                self.calibrate_cursor = 1;
+                self.input_mode = InputMode::CalibrationTargetSelect;
             } else if action == Action::List {
                 self.pending = None;
                 self.username_buf.clear();
@@ -497,10 +625,46 @@ impl<'a> App<'a> {
         self.input_mode = InputMode::SampleCountInput;
     }
 
+    fn toggle_calibrate_target(&mut self) {
+        match self.calibrate_cursor {
+            0 => self.calibrate_sudo = !self.calibrate_sudo,
+            1 => self.calibrate_session = !self.calibrate_session,
+            2 => {
+                let all = self.calibrate_sudo && self.calibrate_session;
+                self.calibrate_sudo = !all;
+                self.calibrate_session = !all;
+            }
+            _ => {}
+        }
+    }
+
+    fn confirm_calibrate_targets(&mut self) {
+        if !self.calibrate_sudo && !self.calibrate_session {
+            return;
+        }
+        let action = match (self.calibrate_sudo, self.calibrate_session) {
+            (true, true) => Action::Calibrate,
+            (true, false) => Action::CalibrateSudo,
+            (false, true) => Action::CalibrateSession,
+            _ => unreachable!(),
+        };
+        self.pending = Some(action);
+        self.sample_count_buf = "5".to_owned();
+        self.input_mode = InputMode::SampleCountInput;
+    }
+
     fn confirm_sample_count(&mut self) {
         let s = self.sample_count_buf.trim().to_owned();
-        let samples = if s.is_empty() {
+        let default_samples = if matches!(
+            self.pending,
+            Some(Action::Calibrate | Action::CalibrateSudo | Action::CalibrateSession)
+        ) {
+            5
+        } else {
             3
+        };
+        let samples = if s.is_empty() {
+            default_samples
         } else {
             match s.parse::<u32>() {
                 Ok(n) if (1..=10).contains(&n) => n,
@@ -637,11 +801,24 @@ impl<'a> App<'a> {
         self.enroll_sudo = true;
         self.enroll_session = false;
         self.enroll_cursor = 0;
+        self.calibrate_sudo = false;
+        self.calibrate_session = true;
+        self.calibrate_cursor = 0;
         self.session_entries.clear();
         self.session_cursor = 0;
         self.template_entries.clear();
         self.template_username.clear();
         self.template_cursor = 0;
+    }
+
+    fn confirm_forget_user(&mut self) {
+        let Some(username) = self.pending_username.take() else {
+            self.cancel_input();
+            return;
+        };
+        self.pending = None;
+        self.input_mode = InputMode::Menu;
+        self.launch(Action::Forget, Some(username), 1, None);
     }
 
     fn launch(
@@ -653,10 +830,13 @@ impl<'a> App<'a> {
     ) {
         let (tx, rx) = mpsc::channel::<String>();
         let config = self.config.clone();
+        let config_path = self.config_path.clone();
 
         thread::spawn(move || {
             let extra: Vec<&str> = pam_service.as_deref().into_iter().collect();
             let result = match &action {
+                Action::Status => commands::status::run_streaming(&config, &config_path, &tx),
+                Action::Logs => commands::user_log::run_streaming(80, &tx),
                 Action::Doctor => commands::doctor::run_streaming(&config, None, &tx),
                 Action::SudoToggle => {
                     commands::sudo_toggle::run_streaming(username.as_deref(), &tx)
@@ -699,12 +879,64 @@ impl<'a> App<'a> {
                     &tx,
                 ),
                 Action::List => commands::list::run_streaming(&config, username.as_deref(), &tx),
+                Action::Forget => match username.as_deref() {
+                    Some(username) => commands::forget::run_streaming(&config, username, true, &tx),
+                    None => Err(anyhow::anyhow!("missing username")),
+                },
                 Action::Test => commands::test::run_streaming(
                     &config,
                     username.as_deref(),
                     commands::test::TestScope::All,
                     &tx,
                 ),
+                Action::CalibrateSudo => match username.as_deref() {
+                    Some(username) => commands::calibrate::run_streaming(
+                        &config,
+                        username,
+                        facegate_core::storage::AuthScope::Sudo,
+                        samples,
+                        &tx,
+                    ),
+                    None => Err(anyhow::anyhow!("missing username")),
+                },
+                Action::CalibrateSession => match username.as_deref() {
+                    Some(username) => commands::calibrate::run_streaming(
+                        &config,
+                        username,
+                        facegate_core::storage::AuthScope::Session,
+                        samples,
+                        &tx,
+                    ),
+                    None => Err(anyhow::anyhow!("missing username")),
+                },
+                Action::Calibrate => match username.as_deref() {
+                    Some(username) => commands::calibrate::run_streaming(
+                        &config,
+                        username,
+                        facegate_core::storage::AuthScope::Session,
+                        samples,
+                        &tx,
+                    )
+                    .and_then(|_| {
+                        let _ = tx.send(String::new());
+                        commands::calibrate::run_streaming(
+                            &config,
+                            username,
+                            facegate_core::storage::AuthScope::Sudo,
+                            samples,
+                            &tx,
+                        )
+                    }),
+                    None => Err(anyhow::anyhow!("missing username")),
+                },
+                Action::Broker => commands::broker_admin::status_streaming(&config, &tx),
+                Action::BrokerHealth => commands::broker_admin::health_streaming(&config, &tx),
+                Action::BrokerRestart => commands::broker_admin::restart_streaming(&tx),
+                Action::BrokerLogs => commands::broker_admin::logs_streaming(80, &tx),
+                Action::BrokerRepairPermissions => {
+                    commands::broker_admin::repair_permissions_streaming(&config, &tx)
+                }
+                Action::EmergencyDisable => commands::emergency_disable::run_streaming(false, &tx),
                 Action::Configure | Action::Enroll => unreachable!(),
             };
             if let Err(e) = result {
@@ -869,6 +1101,50 @@ fn handle_key(app: &mut App, code: KeyCode) {
             KeyCode::Esc => app.cancel_input(),
             _ => {}
         },
+        InputMode::CalibrationTargetSelect => match code {
+            KeyCode::Up | KeyCode::Char('k') if app.calibrate_cursor > 0 => {
+                app.calibrate_cursor -= 1;
+            }
+            KeyCode::Down | KeyCode::Char('j') if app.calibrate_cursor < 2 => {
+                app.calibrate_cursor += 1;
+            }
+            KeyCode::Char(' ') => app.toggle_calibrate_target(),
+            KeyCode::Enter => app.confirm_calibrate_targets(),
+            KeyCode::Esc => app.cancel_input(),
+            _ => {}
+        },
+        InputMode::EmergencyConfirm => match code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                app.input_mode = InputMode::Menu;
+                app.pending = None;
+                app.launch(Action::EmergencyDisable, None, 1, None);
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_input(),
+            _ => {}
+        },
+        InputMode::ForgetConfirm => match code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => app.confirm_forget_user(),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_input(),
+            _ => {}
+        },
+        InputMode::BrokerRestartConfirm => match code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                app.input_mode = InputMode::Menu;
+                app.pending = None;
+                app.launch(Action::BrokerRestart, None, 1, None);
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_input(),
+            _ => {}
+        },
+        InputMode::BrokerRepairConfirm => match code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                app.input_mode = InputMode::Menu;
+                app.pending = None;
+                app.launch(Action::BrokerRepairPermissions, None, 1, None);
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_input(),
+            _ => {}
+        },
         InputMode::Menu => {
             // In Done state, arrows scroll; Enter/Esc go back to menu
             if matches!(app.panel, PanelState::Done { .. }) {
@@ -942,12 +1218,120 @@ fn render(f: &mut Frame, app: &App) {
     if app.input_mode == InputMode::EnrollTargetSelect {
         render_enroll_target_popup(f, app);
     }
+    if app.input_mode == InputMode::CalibrationTargetSelect {
+        render_calibration_target_popup(f, app);
+    }
     if app.input_mode == InputMode::SessionServiceSelect {
         render_session_service_popup(f, app);
     }
     if app.input_mode == InputMode::TemplateList {
         render_template_list_popup(f, app);
     }
+    if app.input_mode == InputMode::EmergencyConfirm {
+        render_emergency_confirm_popup(f);
+    }
+    if app.input_mode == InputMode::ForgetConfirm {
+        render_confirm_popup(
+            f,
+            " Forget User ",
+            Color::Red,
+            &[
+                "This will delete every enrolled template for this user.",
+                "The operation cannot be undone.",
+                "",
+                "Confirm only if password authentication is already working.",
+            ],
+        );
+    }
+    if app.input_mode == InputMode::BrokerRestartConfirm {
+        render_confirm_popup(
+            f,
+            " Broker Restart ",
+            Color::Yellow,
+            &[
+                "This will restart facegate-brokerd.service.",
+                "In-flight authentication attempts may fail and fall back.",
+            ],
+        );
+    }
+    if app.input_mode == InputMode::BrokerRepairConfirm {
+        render_confirm_popup(
+            f,
+            " Repair Broker Permissions ",
+            Color::Yellow,
+            &[
+                "This will chown/chmod broker storage and audit files.",
+                "Symlinks are refused; healthy installs are unchanged.",
+            ],
+        );
+    }
+}
+
+fn render_emergency_confirm_popup(f: &mut Frame) {
+    render_confirm_popup(
+        f,
+        " Emergency Disable ",
+        Color::Red,
+        &[
+            "This will restore clean PAM backups where possible,",
+            "remove remaining pam_facegate.so lines, and stop services.",
+            "",
+            "Confirm only from a root shell you can keep open.",
+        ],
+    );
+}
+
+fn render_confirm_popup(f: &mut Frame, title: &'static str, color: Color, lines: &[&str]) {
+    let area = centered_rect(54, 34, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(color))
+        .title(Span::styled(
+            title,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let inner_layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(4),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    f.render_widget(
+        Paragraph::new(
+            lines
+                .iter()
+                .map(|line| Line::from(*line))
+                .collect::<Vec<_>>(),
+        )
+        .alignment(Alignment::Center),
+        inner_layout[1],
+    );
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "[Y/Enter]",
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" disable   "),
+            Span::styled(
+                "[Esc/N]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" cancel"),
+        ]))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::DarkGray)),
+        inner_layout[2],
+    );
 }
 
 fn render_header(f: &mut Frame, area: Rect) {
@@ -1609,6 +1993,104 @@ fn render_enroll_target_popup(f: &mut Frame, app: &App) {
     for (i, (checked, label, desc)) in items.iter().enumerate() {
         let row = layout[2 + i];
         let selected = app.enroll_cursor == i;
+        let (fg, prefix) = if selected {
+            (Color::Cyan, " ▶ ")
+        } else {
+            (Color::White, "   ")
+        };
+        let checkbox = if *checked { "[x]" } else { "[ ]" };
+        let line = Line::from(vec![
+            Span::styled(
+                format!("{prefix}{checkbox} "),
+                Style::default().fg(fg).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{label:<10}", label = label),
+                Style::default()
+                    .fg(if selected { Color::Cyan } else { Color::White })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {desc}"), Style::default().fg(Color::DarkGray)),
+        ]);
+        f.render_widget(Paragraph::new(line), row);
+    }
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "[Space]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" toggle   "),
+            Span::styled(
+                "[Enter]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" confirm   "),
+            Span::styled(
+                "[Esc]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" cancel"),
+        ]))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::DarkGray)),
+        layout[7],
+    );
+}
+
+fn render_calibration_target_popup(f: &mut Frame, app: &App) {
+    let area = centered_rect(50, 44, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            " Calibrate — select scopes ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let all_checked = app.calibrate_sudo && app.calibrate_session;
+    let items = [
+        (
+            app.calibrate_sudo,
+            "Sudo",
+            "recommend threshold for privileged auth",
+        ),
+        (
+            app.calibrate_session,
+            "Session",
+            "recommend threshold for login & unlock",
+        ),
+        (all_checked, "All", "run both scopes"),
+    ];
+
+    for (i, (checked, label, desc)) in items.iter().enumerate() {
+        let row = layout[2 + i];
+        let selected = app.calibrate_cursor == i;
         let (fg, prefix) = if selected {
             (Color::Cyan, " ▶ ")
         } else {

@@ -278,6 +278,44 @@ After enabling, the output reminds you to also enable the watch daemon for
 automatic screen-lock unlock.
 .RE
 .TP
+.B emergency-disable
+Restore clean Facegate PAM backups where possible, remove remaining
+.B pam_facegate.so
+lines from
+.IR /etc/pam.d ,
+and stop Facegate services for emergency password-auth recovery.
+Use
+.B --dry-run
+to preview the rollback plan without changing files or services.
+.TP
+.B broker status
+Show broker systemd state, IPC socket health, protocol/version, audit log size,
+and storage/socket permissions.
+.TP
+.B broker health
+Ping
+.B facegate-brokerd
+over IPC and print the broker version and protocol version.
+.TP
+.B broker restart
+Restart
+.BR facegate-brokerd.service .
+.TP
+.B broker logs
+Show recent
+.B facegate-brokerd.service
+journal lines. Use
+.B --lines
+to choose the number of lines.
+.TP
+.B broker repair-permissions
+Re-apply
+.B facegate:facegate
+ownership and private modes to
+.IR /var/lib/facegate/users
+and
+.IR /var/lib/facegate/audit.log .
+.TP
 .B list \fIUSERNAME\fR
 List enrolled templates for
 .IR USERNAME ,
@@ -543,6 +581,19 @@ Recognition policy:
 .BR required_matches ,
 .BR max_attempts ,
 .BR min_face_size .
+.B recognition.sudo
+and
+.B recognition.session
+may override
+.BR threshold ,
+.BR required_matches ,
+and
+.BR max_attempts
+per authentication scope. The default sudo policy is stricter
+.RB ( threshold=0.60 ,
+.BR required_matches=2 ,
+.BR max_attempts=5 )
+than session unlock.
 .TP
 .B [models]
 Paths to the ONNX detector and embedder models. Defaults are under

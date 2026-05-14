@@ -1,4 +1,10 @@
-use std::{fs, io::Write, os::unix::fs::PermissionsExt, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::Write,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+};
 
 /// Absolute path so PAM finds the module regardless of the distro's default
 /// search dir (Arch: /usr/lib/security, Debian: /usr/lib/x86_64-linux-gnu/security,
@@ -15,9 +21,13 @@ fn line_matches(line: &str) -> bool {
     t == PAM_LINE.trim() || t == PAM_LINE_LEGACY.trim()
 }
 
+fn content_has_line(content: &str) -> bool {
+    content.lines().any(line_matches)
+}
+
 pub fn file_has_line(path: &str) -> bool {
     fs::read_to_string(path)
-        .map(|c| c.lines().any(line_matches))
+        .map(|c| content_has_line(&c))
         .unwrap_or(false)
 }
 
@@ -55,7 +65,7 @@ fn set_enabled_with_content(
     content: &str,
     enabled: bool,
 ) -> anyhow::Result<bool> {
-    let already_enabled = content.lines().any(line_matches);
+    let already_enabled = content_has_line(content);
 
     if enabled == already_enabled {
         return Ok(false);
@@ -189,4 +199,135 @@ fn write_file_atomic(path: &str, new_content: &str, mode: u32) -> anyhow::Result
         let _ = fs::remove_file(&tmp_path);
     }
     write_result
+}
+
+#[derive(Debug, Clone)]
+pub enum EmergencyPamAction {
+    RestoreBackup { target: PathBuf, backup: PathBuf },
+    StripLine { target: PathBuf },
+}
+
+impl EmergencyPamAction {
+    pub fn target(&self) -> &Path {
+        match self {
+            EmergencyPamAction::RestoreBackup { target, .. } => target,
+            EmergencyPamAction::StripLine { target } => target,
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            EmergencyPamAction::RestoreBackup { target, backup } => {
+                format!("restore {} from {}", target.display(), backup.display())
+            }
+            EmergencyPamAction::StripLine { target } => {
+                format!("remove pam_facegate.so from {}", target.display())
+            }
+        }
+    }
+}
+
+pub fn plan_emergency_restore() -> anyhow::Result<Vec<EmergencyPamAction>> {
+    let pam_dir = Path::new("/etc/pam.d");
+    if !pam_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut clean_backups: BTreeMap<PathBuf, (u64, PathBuf)> = BTreeMap::new();
+    for entry in fs::read_dir(pam_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some((target_name, secs)) = parse_facegate_backup_name(file_name) else {
+            continue;
+        };
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        if content_has_line(&content) {
+            continue;
+        }
+        let target = pam_dir.join(target_name);
+        let replace = clean_backups
+            .get(&target)
+            .map(|(old_secs, _)| secs > *old_secs)
+            .unwrap_or(true);
+        if replace {
+            clean_backups.insert(target, (secs, path));
+        }
+    }
+
+    let mut actions = Vec::new();
+    for (target, (_, backup)) in clean_backups {
+        let target_content = fs::read_to_string(&target).unwrap_or_default();
+        let backup_content = fs::read_to_string(&backup).unwrap_or_default();
+        if target_content != backup_content {
+            actions.push(EmergencyPamAction::RestoreBackup { target, backup });
+        }
+    }
+
+    for entry in fs::read_dir(pam_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() || is_facegate_backup(&path) {
+            continue;
+        }
+        let path_str = path.to_string_lossy();
+        if !file_has_line(&path_str) {
+            continue;
+        }
+        if actions.iter().any(|action| action.target() == path) {
+            continue;
+        }
+        actions.push(EmergencyPamAction::StripLine { target: path });
+    }
+
+    Ok(actions)
+}
+
+pub fn apply_emergency_action(action: &EmergencyPamAction) -> anyhow::Result<()> {
+    match action {
+        EmergencyPamAction::RestoreBackup { target, backup } => {
+            let content = fs::read_to_string(backup)
+                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", backup.display()))?;
+            let mode = fs::metadata(backup)
+                .map_err(|e| anyhow::anyhow!("cannot inspect {}: {e}", backup.display()))?
+                .permissions()
+                .mode()
+                & 0o777;
+            write_file_atomic(&target.to_string_lossy(), &content, mode)
+        }
+        EmergencyPamAction::StripLine { target } => {
+            let content = fs::read_to_string(target)
+                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", target.display()))?;
+            let new_content = content
+                .lines()
+                .filter(|line| !line_matches(line))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            let mode = fs::metadata(target)
+                .map_err(|e| anyhow::anyhow!("cannot inspect {}: {e}", target.display()))?
+                .permissions()
+                .mode()
+                & 0o777;
+            write_file_atomic(&target.to_string_lossy(), &new_content, mode)
+        }
+    }
+}
+
+fn parse_facegate_backup_name(file_name: &str) -> Option<(&str, u64)> {
+    let (prefix, suffix) = file_name.rsplit_once(".facegate.")?;
+    let secs = suffix.strip_suffix(".bak")?.parse::<u64>().ok()?;
+    Some((prefix, secs))
+}
+
+fn is_facegate_backup(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(parse_facegate_backup_name)
+        .is_some()
 }

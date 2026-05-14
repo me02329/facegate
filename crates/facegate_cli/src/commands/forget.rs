@@ -56,6 +56,62 @@ pub fn run(config: &Config, username: &str, skip_confirmation: bool) -> Result<(
     Ok(())
 }
 
+pub fn run_streaming(
+    config: &Config,
+    username: &str,
+    skip_confirmation: bool,
+    tx: &std::sync::mpsc::Sender<String>,
+) -> Result<()> {
+    let _ = config;
+    require_root()?;
+
+    let templates = broker::list_templates(username)?;
+    if templates.is_empty() {
+        let _ = tx.send(format!("No templates enrolled for '{username}'."));
+        return Ok(());
+    }
+
+    let _ = tx.send(format!(
+        "This will permanently remove {} template(s) for '{username}':",
+        templates.len()
+    ));
+    for template in &templates {
+        let _ = tx.send(format!(
+            "  #{:<3} {:<20} scope={} created={}",
+            template.id,
+            template.label,
+            broker::summary_scope_label(template),
+            template.created_at
+        ));
+    }
+
+    if !skip_confirmation && !confirm("Proceed? This cannot be undone.", false)? {
+        let _ = tx.send("Cancelled; no templates removed.".to_owned());
+        return Ok(());
+    }
+
+    let mut removed = 0u32;
+    let mut failures = Vec::new();
+    for template in &templates {
+        match broker::remove_template(username, template.id) {
+            Ok(()) => removed += 1,
+            Err(e) => failures.push((template.id, e.to_string())),
+        }
+    }
+
+    let _ = tx.send(format!(
+        "Removed {removed}/{} template(s) for '{username}'.",
+        templates.len()
+    ));
+    for (id, err) in &failures {
+        let _ = tx.send(format!("  failed to remove template #{id}: {err}"));
+    }
+    if !failures.is_empty() {
+        bail!("{} template(s) failed to remove", failures.len());
+    }
+    Ok(())
+}
+
 fn confirm(prompt: &str, default_yes: bool) -> Result<bool> {
     let suffix = if default_yes { "[Y/n]" } else { "[y/N]" };
     print!("{prompt} {suffix} ");

@@ -92,7 +92,7 @@ migrate_template_storage() {
         echo "Warning: suspicious template paths under $users_dir; refusing to migrate." >&2
         echo "$suspicious" >&2
         echo "Inspect them manually, then rerun:" >&2
-        echo "  sudo facegate broker repair-permissions   # (planned, see #33)" >&2
+        echo "  sudo facegate broker repair-permissions" >&2
         return 0
     fi
 

@@ -1,5 +1,6 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
 
 use anyhow::{bail, Context as _};
 use facegate_core::config::Config;
@@ -48,7 +49,10 @@ pub fn run(
     println!("User      : {username}");
     println!("Scope     : {}", scope_label(auth_scope));
     println!("Samples   : {samples}");
-    println!("Threshold : {:.4}", config.recognition.threshold);
+    println!(
+        "Threshold : {:.4}",
+        config.recognition.policy_for(auth_scope).threshold
+    );
     println!();
     println!("This captures live positive samples and compares them via the broker.");
     println!("No templates are overwritten.");
@@ -71,9 +75,10 @@ pub fn run(
 
     println!();
     let stats = calibration_stats(&scores)?;
-    print_stats(&stats, config.recognition.threshold);
+    let current_threshold = config.recognition.policy_for(auth_scope).threshold;
+    print_stats(&stats, current_threshold);
 
-    if stats.recommended < config.recognition.threshold {
+    if stats.recommended < current_threshold {
         println!(
             "Note: recommendation is below the current threshold because at least one positive sample scored low."
         );
@@ -83,14 +88,20 @@ pub fn run(
         println!();
         if ask_yes_no(
             &format!(
-                "Write recognition.threshold = {:.4} to {}?",
+                "Write {}.threshold = {:.4} to {}?",
+                scope_config_label(auth_scope),
                 stats.recommended,
                 config_path.display()
             ),
             false,
         )? {
             backup_config(&config_path)?;
-            config.recognition.threshold = stats.recommended;
+            match auth_scope {
+                AuthScope::Sudo => config.recognition.sudo.threshold = Some(stats.recommended),
+                AuthScope::Session => {
+                    config.recognition.session.threshold = Some(stats.recommended)
+                }
+            }
             write_config(&config_path, &config)?;
             println!("Config updated.");
             services::print_refresh_summary(&services::refresh_after_config_change());
@@ -101,6 +112,75 @@ pub fn run(
         println!();
         println!("Config unchanged. Re-run with --write to apply the recommendation.");
     }
+
+    Ok(())
+}
+
+pub fn run_streaming(
+    config: &Config,
+    username: &str,
+    auth_scope: AuthScope,
+    samples: u32,
+    tx: &Sender<String>,
+) -> anyhow::Result<()> {
+    if samples == 0 {
+        bail!("samples must be greater than zero");
+    }
+
+    macro_rules! out {
+        ($($arg:tt)*) => {{ let _ = tx.send(format!($($arg)*)); }};
+    }
+
+    let enrolled = broker::list_templates(username)?
+        .into_iter()
+        .filter(|template| broker::summary_allows(template, auth_scope))
+        .count();
+    if enrolled == 0 {
+        bail!(
+            "user has no enrolled templates for {}",
+            scope_label(auth_scope)
+        );
+    }
+
+    let current_threshold = config.recognition.policy_for(auth_scope).threshold;
+    out!("Facegate threshold calibration");
+    out!("User      : {username}");
+    out!("Scope     : {}", scope_label(auth_scope));
+    out!("Samples   : {samples}");
+    out!("Threshold : {current_threshold:.4}");
+    out!("");
+    out!("Capturing live positive samples. Keep your face visible and steady.");
+    out!("No templates or config files will be changed from the TUI.");
+    out!("");
+
+    let mut pipeline = FacePipeline::new(config)?;
+    let mut scores = Vec::with_capacity(samples as usize);
+
+    for index in 1..=samples {
+        out!("Capturing sample {index}/{samples}...");
+        let embedding = pipeline.capture_embedding(config)?;
+        let result = broker::match_embedding(username, auth_scope, embedding)?;
+        let score = result
+            .score
+            .ok_or_else(|| anyhow::anyhow!("broker returned no score for sample {index}"))?;
+        let verdict = if result.matched { "ACCEPT" } else { "REJECT" };
+        out!("  sample {index:>2}/{samples}: {score:.4} ({verdict})");
+        scores.push(score);
+    }
+
+    out!("");
+    let stats = calibration_stats(&scores)?;
+    push_stats(&stats, current_threshold, tx);
+    if stats.recommended < current_threshold {
+        out!(
+            "Note: recommendation is below the current threshold because at least one positive sample scored low."
+        );
+    }
+    out!("");
+    out!(
+        "To apply: sudo facegate calibrate {username} --for {} --samples {samples} --write",
+        scope_label(auth_scope)
+    );
 
     Ok(())
 }
@@ -151,6 +231,24 @@ fn print_stats(stats: &CalibrationStats, current_threshold: f32) {
     println!("  recommended : {:.4}", stats.recommended);
     println!();
     println!(
+        "Recommendation: lowest observed positive score ({:.4}) minus {:.2} safety margin, clamped to [{:.2}, {:.2}].",
+        stats.min, DEFAULT_MARGIN, MIN_RECOMMENDED_THRESHOLD, MAX_RECOMMENDED_THRESHOLD
+    );
+}
+
+fn push_stats(stats: &CalibrationStats, current_threshold: f32, tx: &Sender<String>) {
+    macro_rules! out {
+        ($($arg:tt)*) => {{ let _ = tx.send(format!($($arg)*)); }};
+    }
+    out!("Score distribution");
+    out!("  min         : {:.4}", stats.min);
+    out!("  median      : {:.4}", stats.median);
+    out!("  average     : {:.4}", stats.average);
+    out!("  max         : {:.4}", stats.max);
+    out!("  current     : {current_threshold:.4}");
+    out!("  recommended : {:.4}", stats.recommended);
+    out!("");
+    out!(
         "Recommendation: lowest observed positive score ({:.4}) minus {:.2} safety margin, clamped to [{:.2}, {:.2}].",
         stats.min, DEFAULT_MARGIN, MIN_RECOMMENDED_THRESHOLD, MAX_RECOMMENDED_THRESHOLD
     );
@@ -217,6 +315,13 @@ fn scope_label(scope: AuthScope) -> &'static str {
     match scope {
         AuthScope::Sudo => "sudo",
         AuthScope::Session => "session",
+    }
+}
+
+fn scope_config_label(scope: AuthScope) -> &'static str {
+    match scope {
+        AuthScope::Sudo => "recognition.sudo",
+        AuthScope::Session => "recognition.session",
     }
 }
 

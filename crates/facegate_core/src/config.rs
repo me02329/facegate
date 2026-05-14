@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::error::{FaceRsError, Result};
+use crate::storage::AuthScope;
 
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/facegate/config.toml";
 
@@ -114,6 +115,43 @@ pub struct RecognitionConfig {
     pub required_matches: u32,
     pub max_attempts: u32,
     pub min_face_size: u32,
+    #[serde(default = "default_sudo_recognition_policy")]
+    pub sudo: RecognitionScopeConfig,
+    #[serde(default)]
+    pub session: RecognitionScopeConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RecognitionScopeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_matches: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectiveRecognitionPolicy {
+    pub threshold: f32,
+    pub required_matches: u32,
+    pub max_attempts: u32,
+}
+
+impl RecognitionConfig {
+    pub fn policy_for(&self, scope: AuthScope) -> EffectiveRecognitionPolicy {
+        let override_policy = match scope {
+            AuthScope::Sudo => &self.sudo,
+            AuthScope::Session => &self.session,
+        };
+        EffectiveRecognitionPolicy {
+            threshold: override_policy.threshold.unwrap_or(self.threshold),
+            required_matches: override_policy
+                .required_matches
+                .unwrap_or(self.required_matches),
+            max_attempts: override_policy.max_attempts.unwrap_or(self.max_attempts),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -149,6 +187,14 @@ fn default_cooldown_after_failures() -> u32 {
 
 fn default_cooldown_seconds() -> u64 {
     60
+}
+
+fn default_sudo_recognition_policy() -> RecognitionScopeConfig {
+    RecognitionScopeConfig {
+        threshold: Some(0.60),
+        required_matches: Some(2),
+        max_attempts: Some(5),
+    }
 }
 
 fn default_cross_check_max_time_skew_ms() -> u64 {
@@ -205,6 +251,8 @@ impl Default for Config {
                 required_matches: 1,
                 max_attempts: 3,
                 min_face_size: 80,
+                sudo: default_sudo_recognition_policy(),
+                session: RecognitionScopeConfig::default(),
             },
             models: ModelsConfig {
                 detector: PathBuf::from("/usr/share/facegate/models/scrfd_500m.onnx"),
@@ -346,6 +394,8 @@ impl Config {
                 "recognition.threshold must be a finite value between 0.0 and 1.0".to_string(),
             ));
         }
+        validate_scope_recognition("recognition.sudo", &self.recognition.sudo)?;
+        validate_scope_recognition("recognition.session", &self.recognition.session)?;
         if self.recognition.required_matches == 0 {
             return Err(FaceRsError::Config(
                 "recognition.required_matches must be greater than zero".to_string(),
@@ -360,6 +410,17 @@ impl Config {
             return Err(FaceRsError::Config(
                 "recognition.required_matches cannot exceed recognition.max_attempts".to_string(),
             ));
+        }
+        for (label, scope) in [
+            ("recognition.sudo", AuthScope::Sudo),
+            ("recognition.session", AuthScope::Session),
+        ] {
+            let policy = self.recognition.policy_for(scope);
+            if policy.required_matches > policy.max_attempts {
+                return Err(FaceRsError::Config(format!(
+                    "{label}.required_matches cannot exceed {label}.max_attempts"
+                )));
+            }
         }
         if self.recognition.min_face_size == 0 {
             return Err(FaceRsError::Config(
@@ -400,6 +461,27 @@ impl Config {
     }
 }
 
+fn validate_scope_recognition(label: &str, policy: &RecognitionScopeConfig) -> Result<()> {
+    if let Some(threshold) = policy.threshold {
+        if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+            return Err(FaceRsError::Config(format!(
+                "{label}.threshold must be a finite value between 0.0 and 1.0"
+            )));
+        }
+    }
+    if policy.required_matches == Some(0) {
+        return Err(FaceRsError::Config(format!(
+            "{label}.required_matches must be greater than zero"
+        )));
+    }
+    if policy.max_attempts == Some(0) {
+        return Err(FaceRsError::Config(format!(
+            "{label}.max_attempts must be greater than zero"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +496,16 @@ mod tests {
         assert!(cfg.security.allow_password_fallback);
         assert_eq!(cfg.security.cooldown_after_failures, 10);
         assert_eq!(cfg.security.cooldown_seconds, 60);
+        assert_eq!(
+            cfg.recognition.policy_for(AuthScope::Session).threshold,
+            0.55
+        );
+        assert_eq!(cfg.recognition.policy_for(AuthScope::Sudo).threshold, 0.60);
+        assert_eq!(
+            cfg.recognition.policy_for(AuthScope::Sudo).required_matches,
+            2
+        );
+        assert_eq!(cfg.recognition.policy_for(AuthScope::Sudo).max_attempts, 5);
         cfg.validate().expect("default config validates");
     }
 
@@ -512,7 +604,66 @@ mod tests {
         let mut cfg = Config::default();
         cfg.recognition.required_matches = 2;
         cfg.recognition.max_attempts = 1;
+        cfg.recognition.sudo = RecognitionScopeConfig::default();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn parses_legacy_recognition_config_with_scope_defaults() {
+        let toml = r#"
+            [camera]
+            device = "/dev/video0"
+            width = 640
+            height = 360
+            fps = 30
+            timeout_ms = 5000
+            warmup_frames = 3
+
+            [recognition]
+            threshold = 0.55
+            required_matches = 1
+            max_attempts = 3
+            min_face_size = 80
+
+            [models]
+            detector = "/tmp/detector.onnx"
+            embedder = "/tmp/embedder.onnx"
+
+            [storage]
+            base_dir = "/tmp/facegate/users"
+
+            [logging]
+            level = "info"
+            log_failed_attempts = true
+
+            [security]
+            allow_password_fallback = true
+            deny_on_camera_error = false
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("legacy config parses");
+        cfg.validate().expect("legacy config validates");
+        assert_eq!(
+            cfg.recognition.policy_for(AuthScope::Session).threshold,
+            0.55
+        );
+        assert_eq!(cfg.recognition.policy_for(AuthScope::Sudo).threshold, 0.60);
+    }
+
+    #[test]
+    fn scope_policy_overrides_global_defaults() {
+        let mut cfg = Config::default();
+        cfg.recognition.session.threshold = Some(0.58);
+        cfg.recognition.session.required_matches = Some(2);
+        cfg.recognition.session.max_attempts = Some(4);
+        cfg.validate().expect("scope policy validates");
+        assert_eq!(
+            cfg.recognition.policy_for(AuthScope::Session),
+            EffectiveRecognitionPolicy {
+                threshold: 0.58,
+                required_matches: 2,
+                max_attempts: 4,
+            }
+        );
     }
 
     #[test]

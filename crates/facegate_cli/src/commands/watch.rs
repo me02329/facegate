@@ -226,10 +226,11 @@ fn run_recognition(
         None
     };
 
-    let required = config.recognition.required_matches.max(1);
+    let policy = config.recognition.policy_for(AuthScope::Session);
+    let required = policy.required_matches.max(1);
     let mut matches: u32 = 0;
 
-    for attempt in 1..=config.recognition.max_attempts {
+    for attempt in 1..=policy.max_attempts {
         if cancel.load(Ordering::Relaxed) {
             tracing::debug!("recognition cancelled (attempt {attempt})");
             return;

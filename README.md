@@ -349,6 +349,12 @@ systemctl --user enable --now facegate-watch
 | `setup [USERNAME]` | Guided first-time setup flow (camera → enrol → PAM wiring) |
 | `status` | Compact installation, broker reachability, and enrolment summary (also shows recent audit events) |
 | `logs [--lines N]` | Show the current user's local diagnostic log |
+| `emergency-disable [--dry-run]` | Restore Facegate PAM backups, remove remaining Facegate PAM lines, and stop services |
+| `broker status` | Show broker service, socket, audit log, and storage status |
+| `broker health` | Ping the broker over IPC and print version/protocol |
+| `broker restart` | Restart `facegate-brokerd.service` |
+| `broker logs [--lines N]` | Show recent `facegate-brokerd.service` journal lines |
+| `broker repair-permissions` | Re-apply `facegate:facegate` ownership and private modes to broker storage |
 | `doctor` | Check installation status |
 | `cameras` | List `/dev/video*` and flag IR vs RGB |
 | `camera-test [--device DEV]` | Test camera and face detection |
@@ -362,9 +368,13 @@ systemctl --user enable --now facegate-watch
 | `session-auth` | Toggle face auth in login/session PAM services |
 | `completions SHELL` | Print shell completion script |
 
-All commands except `completions`, `cameras`, `status`, and the internal
+All commands except `completions`, `cameras`, `status`, `logs`,
+`broker status`, `broker health`, `broker logs`, and the internal
 `watch`/`auth` helpers require root. `cameras`, `status`, `logs`, and `watch` run as
-the normal user. All template reads/writes and all match decisions
+the normal user. If PAM recovery is needed, see
+[`docs/recovery.md`](docs/recovery.md) and start with
+`sudo facegate emergency-disable --dry-run`.
+All template reads/writes and all match decisions
 ultimately go through `facegate-brokerd` over `/run/facegate/broker.sock`.
 
 Facegate also writes a user-readable diagnostic log at
@@ -401,10 +411,20 @@ homography = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 allow_identity_homography = false   # refuse identity matrix unless explicit
 
 [recognition]
-threshold = 0.55        # cosine similarity threshold (higher = stricter)
-required_matches = 1    # how many templates must match
-max_attempts = 5        # capture attempts before giving up
+threshold = 0.55        # default cosine similarity threshold (higher = stricter)
+required_matches = 1    # default number of successful captures required
+max_attempts = 3        # default capture attempts before giving up
 min_face_size = 80      # minimum face bounding-box size in pixels
+
+[recognition.session]
+threshold = 0.55
+required_matches = 1
+max_attempts = 3
+
+[recognition.sudo]
+threshold = 0.60        # stricter privileged default
+required_matches = 2
+max_attempts = 5
 
 [models]
 detector = "/usr/share/facegate/models/scrfd_500m.onnx"
@@ -427,6 +447,14 @@ log_failed_attempts = true
 The `[security].cooldown_after_failures` / `cooldown_seconds` knobs are
 enforced server-side by the broker, per-peer-UID and per-username, so a
 hostile client cannot bypass the lockout by reconnecting.
+
+`[recognition.sudo]` and `[recognition.session]` can override
+`threshold`, `required_matches`, and `max_attempts` per scope. Higher
+thresholds and multiple required matches reduce false accepts, but they
+also increase false rejects under poor lighting or awkward camera angles.
+Use `sudo facegate calibrate USER --for sudo --write` and
+`sudo facegate calibrate USER --for session --write` to tune from live
+positive samples without exposing stored embeddings.
 
 When `[camera.cross_check].enabled = true`, a `[camera.ir]` section must be
 configured. Auth clients capture the RGB and IR streams in parallel and

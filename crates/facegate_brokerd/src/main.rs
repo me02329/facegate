@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use facegate_core::camera::Frame;
-use facegate_core::config::{CameraConfig, Config, ModelsConfig, DEFAULT_CONFIG_PATH};
+use facegate_core::config::{
+    CameraConfig, Config, EffectiveRecognitionPolicy, ModelsConfig, DEFAULT_CONFIG_PATH,
+};
 use facegate_core::detection::{Detection, ScrfdDetector};
 use facegate_core::embedding::ArcFaceEmbedder;
 use facegate_core::error::FaceRsError;
@@ -145,7 +147,8 @@ async fn handle_client(
 struct BrokerState {
     storage_base_dir: PathBuf,
     audit_path: PathBuf,
-    threshold: f32,
+    sudo_policy: EffectiveRecognitionPolicy,
+    session_policy: EffectiveRecognitionPolicy,
     min_face_size: u32,
     cooldown_after_failures: u32,
     cooldown_duration: Duration,
@@ -236,7 +239,8 @@ impl BrokerState {
         Self {
             storage_base_dir: config.storage.base_dir,
             audit_path,
-            threshold: config.recognition.threshold,
+            sudo_policy: config.recognition.policy_for(AuthScope::Sudo),
+            session_policy: config.recognition.policy_for(AuthScope::Session),
             min_face_size: config.recognition.min_face_size,
             cooldown_after_failures: config.security.cooldown_after_failures,
             cooldown_duration: Duration::from_secs(config.security.cooldown_seconds),
@@ -344,6 +348,13 @@ impl BrokerState {
         }
     }
 
+    fn policy_for(&self, auth_scope: AuthScope) -> EffectiveRecognitionPolicy {
+        match auth_scope {
+            AuthScope::Sudo => self.sudo_policy,
+            AuthScope::Session => self.session_policy,
+        }
+    }
+
     fn store(&self) -> TemplateStore {
         TemplateStore::new(&self.storage_base_dir)
     }
@@ -437,7 +448,7 @@ impl BrokerState {
                 "user has no enrolled templates",
             );
         };
-        let matched = score >= self.threshold;
+        let matched = score >= self.policy_for(auth_scope).threshold;
         self.zeroize_templates(&mut templates);
         if matched {
             self.record_match_success(username);
@@ -1354,7 +1365,16 @@ mod tests {
         let state = BrokerState {
             storage_base_dir: dir.path().to_owned(),
             audit_path: dir.path().join("audit.log"),
-            threshold: 0.55,
+            sudo_policy: EffectiveRecognitionPolicy {
+                threshold: 0.60,
+                required_matches: 2,
+                max_attempts: 5,
+            },
+            session_policy: EffectiveRecognitionPolicy {
+                threshold: 0.55,
+                required_matches: 1,
+                max_attempts: 3,
+            },
             min_face_size: 80,
             cooldown_after_failures: 10,
             cooldown_duration: Duration::from_secs(60),

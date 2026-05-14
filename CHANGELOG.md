@@ -10,11 +10,29 @@ on a best-effort basis while the IPC protocol stabilises.
 In-progress work targeting **v0.3.0**. Focus so far: packaging
 reliability, install-time correctness, contributor ergonomics, and a
 documented security disclosure channel. The bigger features tracked
-for this release (broker subcommands,
-emergency PAM rollback, liveness PAD groundwork) are still open.
+for this release (broker subcommands and liveness PAD groundwork) are
+still open.
 
 ### Added
 
+- `facegate emergency-disable [--dry-run]` restores clean Facegate PAM
+  backups where possible, strips remaining `pam_facegate.so` lines, stops
+  the broker/watch services, and is exposed in the TUI behind a
+  confirmation prompt. `docs/recovery.md` documents shell, TTY, chroot,
+  and live-USB recovery flows (#34, #37).
+- `facegate broker` subcommands: `status`, `health`, `restart`, `logs`,
+  and `repair-permissions`. The TUI now exposes a top-level Broker entry
+  for service/socket/audit/storage status (#33).
+- The TUI main menu now exposes more CLI surfaces directly: status, user
+  logs, broker health/restart/logs/repair-permissions, and bulk
+  per-user template deletion with confirmation. Threshold calibration is
+  also available from the TUI with sudo/session scope selection and
+  sample-count input.
+- Scope-specific recognition policy via `[recognition.sudo]` and
+  `[recognition.session]`, with stricter sudo defaults
+  (`threshold=0.60`, `required_matches=2`, `max_attempts=5`) while keeping
+  session unlock convenience defaults. Calibration writes the selected
+  scope's threshold override (#27).
 - `SECURITY.md` with a supported-versions table, a private disclosure
   channel (GitHub private vulnerability reporting + email fallback),
   acknowledgement / triage / disclosure windows (7 / 14 / 90 days),

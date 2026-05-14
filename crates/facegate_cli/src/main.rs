@@ -31,6 +31,17 @@ enum Command {
         #[arg(long, default_value_t = 80)]
         lines: usize,
     },
+    /// Restore PAM backups and stop Facegate services for emergency recovery
+    EmergencyDisable {
+        /// Print the rollback plan without changing files or services
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Inspect or manage the Facegate broker daemon
+    Broker {
+        #[command(subcommand)]
+        command: BrokerCommand,
+    },
     /// Guided first-time setup flow
     Setup {
         /// User to enroll; defaults to SUDO_USER or USER
@@ -149,6 +160,24 @@ enum CalibrationPurpose {
     Session,
 }
 
+#[derive(Debug, Subcommand)]
+enum BrokerCommand {
+    /// Show broker service, socket, audit, and storage status
+    Status,
+    /// Ping the broker over IPC
+    Health,
+    /// Restart facegate-brokerd.service
+    Restart,
+    /// Show broker journal logs
+    Logs {
+        /// Number of recent journal lines to print
+        #[arg(long, default_value_t = 80)]
+        lines: usize,
+    },
+    /// Re-apply broker-owned template/audit permissions
+    RepairPermissions,
+}
+
 impl From<CalibrationPurpose> for facegate_core::storage::AuthScope {
     fn from(value: CalibrationPurpose) -> Self {
         match value {
@@ -185,6 +214,12 @@ fn main() {
     let watch_mode = matches!(&cli.command, Some(Command::Watch));
     let status_mode = matches!(&cli.command, Some(Command::Status));
     let logs_mode = matches!(&cli.command, Some(Command::Logs { .. }));
+    let broker_unprivileged_mode = matches!(
+        &cli.command,
+        Some(Command::Broker {
+            command: BrokerCommand::Status | BrokerCommand::Health | BrokerCommand::Logs { .. }
+        })
+    );
     // `cameras` only opens /dev/video* in read-only-ish ways; it should be
     // runnable as a normal user so people can discover their IR camera before
     // running anything privileged.
@@ -203,7 +238,13 @@ fn main() {
     // Auth, watch, status, logs, and the read-only `cameras` listing run as an
     // unprivileged user. Every other command touches sensitive face data or
     // system config, so we require root.
-    if !auth_mode && !watch_mode && !status_mode && !logs_mode && !cameras_mode {
+    if !auth_mode
+        && !watch_mode
+        && !status_mode
+        && !logs_mode
+        && !cameras_mode
+        && !broker_unprivileged_mode
+    {
         // SAFETY: geteuid() is always safe to call.
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("Error: facegate must be run as root (e.g. sudo facegate).");
@@ -272,9 +313,12 @@ enum ConfigPolicy {
 fn config_policy(command: &Option<Command>) -> ConfigPolicy {
     match command {
         Some(Command::Auth { .. }) => ConfigPolicy::StrictSilent,
-        Some(Command::Configure) | Some(Command::Doctor) | Some(Command::Status) | None => {
-            ConfigPolicy::DefaultOnError
-        }
+        Some(Command::Configure)
+        | Some(Command::Doctor)
+        | Some(Command::Status)
+        | Some(Command::Broker { .. })
+        | Some(Command::EmergencyDisable { .. })
+        | None => ConfigPolicy::DefaultOnError,
         // `cameras` does not need a config at all (it walks /dev/video*),
         // so don't fail if /etc/facegate/config.toml is missing.
         Some(Command::Watch) | Some(Command::Cameras) => ConfigPolicy::DefaultOnError,
@@ -314,6 +358,14 @@ fn run_command(
         Command::Configure => commands::configure::run(config, config_path),
         Command::Status => commands::status::run(&config, &config_path),
         Command::Logs { lines } => commands::user_log::run(lines),
+        Command::EmergencyDisable { dry_run } => commands::emergency_disable::run(dry_run),
+        Command::Broker { command } => match command {
+            BrokerCommand::Status => commands::broker_admin::status(&config),
+            BrokerCommand::Health => commands::broker_admin::health(&config),
+            BrokerCommand::Restart => commands::broker_admin::restart(),
+            BrokerCommand::Logs { lines } => commands::broker_admin::logs(lines),
+            BrokerCommand::RepairPermissions => commands::broker_admin::repair_permissions(&config),
+        },
         Command::Setup { username } => commands::setup::run(config, config_path, username),
         Command::Doctor => commands::doctor::run(&config),
         Command::CameraTest { device } => commands::camera_test::run(&config, device.as_deref()),

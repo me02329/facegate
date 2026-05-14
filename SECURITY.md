@@ -103,12 +103,15 @@ exploited:
 2. Disable face auth quickly:
 
    ```bash
-   sudo facegate session-auth     # toggles PAM off
+   sudo facegate emergency-disable --dry-run
+   sudo facegate emergency-disable
+   sudo facegate session-auth     # fallback toggle if needed
    sudo systemctl disable --now facegate-brokerd.service
    systemctl --user disable --now facegate-watch.service
    ```
 
-3. Restore `/etc/pam.d/*.bak` files written by `session-auth`.
+3. If the emergency command cannot run, restore
+   `/etc/pam.d/*.facegate.*.bak` files manually.
 4. Capture evidence before reinstalling:
    - `journalctl -u facegate-brokerd.service`;
    - `/var/lib/facegate/audit.log`;
@@ -116,8 +119,8 @@ exploited:
    - the output of `sudo facegate status` and `sudo facegate doctor`.
 5. Report the incident using the channel above.
 
-A full PAM recovery guide (including chroot / live-USB scenarios) is
-tracked as [#37][issue-37] and will live at `docs/recovery.md`.
+A full PAM recovery guide (including chroot / live-USB scenarios) lives
+at [`docs/recovery.md`](docs/recovery.md).
 
 ## Threat model
 

@@ -1,12 +1,14 @@
 pub mod add;
 pub mod auth;
 pub mod broker;
+pub mod broker_admin;
 pub mod calibrate;
 pub mod calibrate_cameras;
 pub mod camera_test;
 pub mod cameras;
 pub mod configure;
 pub mod doctor;
+pub mod emergency_disable;
 pub mod forget;
 pub mod list;
 pub mod pam_edit;

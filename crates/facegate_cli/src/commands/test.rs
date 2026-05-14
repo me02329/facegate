@@ -133,7 +133,7 @@ pub fn run_streaming(
         match_frame_for_scopes(username, &auth_scopes, probe)?
     };
 
-    let threshold = config.recognition.threshold;
+    let threshold_label = threshold_label(config, &auth_scopes);
     match result.score {
         None => {
             out!("No match score returned.");
@@ -153,7 +153,7 @@ pub fn run_streaming(
             let label = if result.matched { "ACCEPT" } else { "REJECT" };
             let marker = if result.matched { "✓" } else { "✗" };
             out!("Best similarity : {score:.4}");
-            out!("Threshold       : {threshold}");
+            out!("Threshold       : {threshold_label}");
             if !result.matched {
                 out!(
                     "Reason          : {}",
@@ -166,12 +166,36 @@ pub fn run_streaming(
                 format!(
                     "test result={} reason={} score={score:.4} threshold={threshold}",
                     label.to_ascii_lowercase(),
-                    broker::match_reason_label(result.reason)
+                    broker::match_reason_label(result.reason),
+                    threshold = threshold_label
                 ),
             );
         }
     }
     Ok(())
+}
+
+fn threshold_label(config: &Config, auth_scopes: &[AuthScope]) -> String {
+    if auth_scopes.len() == 1 {
+        return format!(
+            "{:.4}",
+            config.recognition.policy_for(auth_scopes[0]).threshold
+        );
+    }
+    auth_scopes
+        .iter()
+        .map(|scope| {
+            let label = match scope {
+                AuthScope::Sudo => "sudo",
+                AuthScope::Session => "session",
+            };
+            format!(
+                "{label}={:.4}",
+                config.recognition.policy_for(*scope).threshold
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn match_frame_pair_for_scopes(

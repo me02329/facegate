@@ -24,6 +24,58 @@ pub fn run(config: &Config, config_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn run_streaming(
+    config: &Config,
+    config_path: &Path,
+    tx: &std::sync::mpsc::Sender<String>,
+) -> anyhow::Result<()> {
+    macro_rules! out {
+        ($($arg:tt)*) => {{ let _ = tx.send(format!($($arg)*)); }};
+    }
+
+    out!("Facegate status");
+    out!("");
+    out!("Config");
+    out!("  path   : {}", config_path.display());
+    out!(
+        "  parse  : {}",
+        match Config::load(config_path) {
+            Ok(_) => "ok".to_owned(),
+            Err(e) => format!("error ({e})"),
+        }
+    );
+    out!("  storage: {}", config.storage.base_dir.display());
+    out!("");
+    crate::commands::broker_admin::status_streaming(config, tx)?;
+    out!("");
+    out!("Auth");
+    out!(
+        "  sudo   : {}",
+        if sudo_toggle::is_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    out!(
+        "  session: {}",
+        if session_toggle::is_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    out!(
+        "  watch  : {}",
+        if watch_toggle::is_active() {
+            "running"
+        } else {
+            "stopped"
+        }
+    );
+    Ok(())
+}
+
 fn print_audit() {
     println!("Audit");
     let username = current_username();

@@ -44,9 +44,8 @@ Exact values should be validated with real cameras before shipping.
 
 ## Acceptance criteria
 
-- Config can express scope-specific threshold and required-match policy.
-- Existing configs migrate cleanly.
-- Docs explain FAR/FRR trade-offs in plain language.
-- `facegate test` helps users calibrate thresholds without exposing stored embeddings.
-- CI covers config parsing and fallback compatibility.
-
+- [x] Config can express scope-specific threshold and required-match policy.
+- [x] Existing configs migrate cleanly.
+- [x] Docs explain FAR/FRR trade-offs in plain language.
+- [x] `facegate test` helps users calibrate thresholds without exposing stored embeddings.
+- [x] CI covers config parsing and fallback compatibility.

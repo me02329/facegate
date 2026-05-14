@@ -43,6 +43,37 @@ pub fn run(lines: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn run_streaming(lines: usize, tx: &std::sync::mpsc::Sender<String>) -> anyhow::Result<()> {
+    macro_rules! out {
+        ($($arg:tt)*) => {{ let _ = tx.send(format!($($arg)*)); }};
+    }
+
+    let user = current_user()?;
+    let path = log_path(&user);
+    out!("{}", path.display());
+    out!("");
+
+    let file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            out!("No Facegate user log yet.");
+            return Ok(());
+        }
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
+
+    let reader = std::io::BufReader::new(file);
+    let mut all = reader
+        .lines()
+        .map_while(std::result::Result::ok)
+        .collect::<Vec<_>>();
+    let keep_from = all.len().saturating_sub(lines.max(1));
+    for line in all.drain(keep_from..) {
+        out!("{}", display_line(&line));
+    }
+    Ok(())
+}
+
 pub fn append_for_user(username: &str, message: impl AsRef<str>) {
     let Ok(user) = user_by_name(username) else {
         return;

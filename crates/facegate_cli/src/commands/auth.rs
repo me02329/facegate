@@ -23,6 +23,7 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
         format!("auth start service={}", service.unwrap_or("unknown")),
     );
     let auth_scope = auth_scope_for_service(service);
+    let policy = config.recognition.policy_for(auth_scope);
     let cross_check = cross_check_active(config);
 
     let mut camera = match open_rgb_camera(config) {
@@ -70,7 +71,7 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
 
     let mut matches = 0_u32;
     let mut saw_timeout = false;
-    for attempt in 1..=config.recognition.max_attempts {
+    for attempt in 1..=policy.max_attempts {
         let result = if let Some(ir_camera) = ir_camera.as_mut() {
             let mut selected = None;
             for capture_attempt in 1..=CROSS_CHECK_CAPTURE_RETRIES {
@@ -146,11 +147,11 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
                 tracing::debug!(
                     attempt,
                     matches,
-                    required = config.recognition.required_matches,
+                    required = policy.required_matches,
                     score = result.score,
                     "face match accepted for attempt"
                 );
-                if matches >= config.recognition.required_matches {
+                if matches >= policy.required_matches {
                     tracing::info!("auth succeeded for '{username}'");
                     eprintln!("[ facegate ] \u{2714} Face recognized: {username}");
                     user_log::append_for_user(
