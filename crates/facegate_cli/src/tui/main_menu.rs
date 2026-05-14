@@ -359,24 +359,81 @@ enum InputMode {
 }
 
 /// Snapshot of system state that refreshes in the background while the TUI
-/// is idle.  Cheap probes only — anything that shells out (`systemctl`) runs
-/// on a worker thread so the UI never blocks.
+/// is idle.  Cheap probes only — anything that shells out (`systemctl`) or
+/// talks to the broker runs on a worker thread so the UI never blocks.
 #[derive(Clone, Default)]
 struct LiveStatus {
     broker_socket: bool,
     watch_active: bool,
     sudo_pam: bool,
     session_pam: bool,
+    rgb_present: bool,
+    ir_configured: bool,
+    ir_present: bool,
+    last_audit: Option<LiveAudit>,
+    template_count: Option<usize>,
+}
+
+#[derive(Clone)]
+struct LiveAudit {
+    age_secs: u64,
+    outcome: facegate_ipc::AuditOutcome,
+    reason: facegate_ipc::AuditReason,
 }
 
 impl LiveStatus {
-    fn probe() -> Self {
+    fn probe(rgb_path: &str, ir_path: Option<&str>, username: Option<&str>) -> Self {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let last_audit = username.and_then(|u| {
+            commands::broker::audit_recent(Some(u.to_owned()), 1)
+                .ok()
+                .and_then(|events| events.into_iter().next())
+                .map(|event| LiveAudit {
+                    age_secs: now_unix.saturating_sub(event.timestamp_unix),
+                    outcome: event.outcome,
+                    reason: event.reason,
+                })
+        });
+        let template_count = username.and_then(|u| {
+            commands::broker::list_templates(u)
+                .ok()
+                .map(|templates| templates.len())
+        });
         Self {
             broker_socket: std::path::Path::new("/run/facegate/broker.sock").exists(),
             watch_active: commands::watch_toggle::is_active(),
             sudo_pam: commands::sudo_toggle::is_enabled(),
             session_pam: commands::session_toggle::is_enabled(),
+            rgb_present: std::path::Path::new(rgb_path).exists(),
+            ir_configured: ir_path.is_some(),
+            ir_present: ir_path
+                .map(|p| std::path::Path::new(p).exists())
+                .unwrap_or(false),
+            last_audit,
+            template_count,
         }
+    }
+}
+
+fn current_username_for_probe() -> Option<String> {
+    std::env::var("SUDO_USER")
+        .ok()
+        .filter(|s| !s.is_empty() && s != "root")
+        .or_else(|| std::env::var("USER").ok().filter(|s| !s.is_empty()))
+}
+
+fn format_age(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
     }
 }
 
@@ -437,16 +494,15 @@ impl<'a> App<'a> {
         let session_enabled = commands::session_toggle::is_enabled();
         let watch_active = commands::watch_toggle::is_active();
         let items = build_items(sudo_enabled, session_enabled, watch_active);
-        let initial = LiveStatus {
-            broker_socket: std::path::Path::new("/run/facegate/broker.sock").exists(),
-            watch_active,
-            sudo_pam: sudo_enabled,
-            session_pam: session_enabled,
-        };
+        let rgb_path = config.camera.device.clone();
+        let ir_path = config.camera.ir.as_ref().map(|ir| ir.device.clone());
+        let username = current_username_for_probe();
+        let initial = LiveStatus::probe(&rgb_path, ir_path.as_deref(), username.as_deref());
         let (live_tx, live_rx) = mpsc::channel::<LiveStatus>();
         thread::spawn(move || loop {
             thread::sleep(Duration::from_millis(1500));
-            if live_tx.send(LiveStatus::probe()).is_err() {
+            let snap = LiveStatus::probe(&rgb_path, ir_path.as_deref(), username.as_deref());
+            if live_tx.send(snap).is_err() {
                 return;
             }
         });
@@ -1505,15 +1561,45 @@ fn render_panel(f: &mut Frame, area: Rect, app: &App) {
                 status_row("Watch service", s.watch_active, "active", "inactive"),
                 status_row("Sudo PAM", s.sudo_pam, "enabled", "disabled"),
                 status_row("Session PAM", s.session_pam, "enabled", "disabled"),
-                Line::from(""),
-                Line::from(Span::styled(
-                    format!("  {}{}", sel.icon, sel.label),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
+                status_row("RGB camera", s.rgb_present, "present", "missing"),
             ];
+            if s.ir_configured {
+                lines.push(status_row(
+                    "IR camera",
+                    s.ir_present,
+                    "present",
+                    "missing",
+                ));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        "·",
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        format!("{:<14}", "IR camera"),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        "not configured",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+            lines.push(audit_row(s.last_audit.as_ref()));
+            lines.push(template_row(s.template_count));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("  {}{}", sel.icon, sel.label),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
             if sel.kind == ItemKind::Section || sel.description.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "  Select an action from the menu.",
@@ -2275,6 +2361,106 @@ fn render_pam_service_popup(f: &mut Frame, app: &App) {
         .style(Style::default().fg(Color::DarkGray)),
         layout[5],
     );
+}
+
+fn template_row(count: Option<usize>) -> Line<'static> {
+    match count {
+        None => Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "·",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("{:<14}", "Templates"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled("unavailable", Style::default().fg(Color::DarkGray)),
+        ]),
+        Some(n) => {
+            let (dot, color) = if n > 0 {
+                ("●", Color::Green)
+            } else {
+                ("○", Color::Yellow)
+            };
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    dot.to_string(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:<14}", "Templates"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    if n == 1 {
+                        "1 enrolled".to_owned()
+                    } else {
+                        format!("{n} enrolled")
+                    },
+                    Style::default().fg(color),
+                ),
+            ])
+        }
+    }
+}
+
+fn audit_row(audit: Option<&LiveAudit>) -> Line<'static> {
+    match audit {
+        None => Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "·",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("{:<14}", "Last auth"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled("none yet", Style::default().fg(Color::DarkGray)),
+        ]),
+        Some(a) => {
+            let success = matches!(a.outcome, facegate_ipc::AuditOutcome::Success);
+            let (dot, color) = if success {
+                ("●", Color::Green)
+            } else {
+                ("○", Color::Red)
+            };
+            let reason = match a.reason {
+                facegate_ipc::AuditReason::Matched => "matched",
+                facegate_ipc::AuditReason::Mismatch => "mismatch",
+                facegate_ipc::AuditReason::NotEnrolled => "not_enrolled",
+                facegate_ipc::AuditReason::RateLimited => "rate_limited",
+                facegate_ipc::AuditReason::LockedOut => "locked_out",
+                facegate_ipc::AuditReason::Unauthorized => "unauthorized",
+                facegate_ipc::AuditReason::Internal => "internal",
+            };
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    dot.to_string(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:<14}", "Last auth"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("{reason} · {}", format_age(a.age_secs)),
+                    Style::default().fg(color),
+                ),
+            ])
+        }
+    }
 }
 
 fn status_row(label: &str, ok: bool, ok_text: &str, ko_text: &str) -> Line<'static> {

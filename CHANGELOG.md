@@ -87,11 +87,12 @@ security disclosure documentation set
   `facegate-brokerd.service` and restart the user's `facegate-watch`
   service if it is active, so config changes apply immediately.
 - TUI idle pane now shows a live system status block — broker socket
-  reachability, watch service activity, sudo PAM, session PAM — pushed
-  every 1.5 s by a background probe thread so the indicators refresh
-  without user input. Long command output (logs, status, audit
-  entries) now wraps inside the right pane instead of clipping past
-  the border (#47).
+  reachability, watch service activity, sudo / session PAM, RGB and
+  IR camera presence, last audit event (outcome and age), and
+  enrolled template count — pushed every 1.5 s by a background probe
+  thread so the indicators refresh without user input. Long command
+  output (logs, status, audit entries) now wraps inside the right
+  pane instead of clipping past the border (closes #47).
 
 ### Changed
 
