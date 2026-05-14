@@ -28,6 +28,13 @@ still open.
   per-user template deletion with confirmation. Threshold calibration is
   also available from the TUI with sudo/session scope selection and
   sample-count input.
+- `facegate users [--json]` lists enrolled users through the broker,
+  including template counts, scopes, enrollment timestamps, and
+  directory/file ownership state. The TUI exposes this as Enrolled Users
+  (#35).
+- `docs/ipc-protocol.md`, `docs/threat-model.md`, and `CONTRIBUTING.md`
+  document the broker IPC, security model, and contributor workflow
+  (#36, #38, #39).
 - Scope-specific recognition policy via `[recognition.sudo]` and
   `[recognition.session]`, with stricter sudo defaults
   (`threshold=0.60`, `required_matches=2`, `max_attempts=5`) while keeping

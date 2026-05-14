@@ -20,5 +20,6 @@ pub mod status;
 pub mod sudo_toggle;
 pub mod test;
 pub mod user_log;
+pub mod users;
 pub mod watch;
 pub mod watch_toggle;

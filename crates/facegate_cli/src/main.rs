@@ -42,6 +42,12 @@ enum Command {
         #[command(subcommand)]
         command: BrokerCommand,
     },
+    /// List enrolled users and broker storage ownership state
+    Users {
+        /// Emit JSON for scripts
+        #[arg(long)]
+        json: bool,
+    },
     /// Guided first-time setup flow
     Setup {
         /// User to enroll; defaults to SUDO_USER or USER
@@ -218,7 +224,7 @@ fn main() {
         &cli.command,
         Some(Command::Broker {
             command: BrokerCommand::Status | BrokerCommand::Health | BrokerCommand::Logs { .. }
-        })
+        }) | Some(Command::Users { .. })
     );
     // `cameras` only opens /dev/video* in read-only-ish ways; it should be
     // runnable as a normal user so people can discover their IR camera before
@@ -317,6 +323,7 @@ fn config_policy(command: &Option<Command>) -> ConfigPolicy {
         | Some(Command::Doctor)
         | Some(Command::Status)
         | Some(Command::Broker { .. })
+        | Some(Command::Users { .. })
         | Some(Command::EmergencyDisable { .. })
         | None => ConfigPolicy::DefaultOnError,
         // `cameras` does not need a config at all (it walks /dev/video*),
@@ -366,6 +373,7 @@ fn run_command(
             BrokerCommand::Logs { lines } => commands::broker_admin::logs(lines),
             BrokerCommand::RepairPermissions => commands::broker_admin::repair_permissions(&config),
         },
+        Command::Users { json } => commands::users::run(json),
         Command::Setup { username } => commands::setup::run(config, config_path, username),
         Command::Doctor => commands::doctor::run(&config),
         Command::CameraTest { device } => commands::camera_test::run(&config, device.as_deref()),

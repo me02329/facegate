@@ -1,7 +1,7 @@
 use std::ffi::CString;
 use std::fs;
 use std::io::{BufRead, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -18,8 +18,9 @@ use facegate_core::matching::cosine_similarity;
 use facegate_core::storage::{AuthScope, TemplateScope, TemplateStore};
 use facegate_ipc::{
     encode_response, AuditEvent, AuditOutcome, AuditReason, BrokerInfo, EnrolledTemplateSummary,
-    ErrorCode, FrameFormat, FrameProbe, MatchReason, MatchResult, Request, RequestEnvelope,
-    Response, ResponseEnvelope, MAX_REQUEST_BYTES, PROTOCOL_VERSION,
+    EnrolledUserSummary, ErrorCode, FrameFormat, FrameProbe, MatchReason, MatchResult,
+    OwnershipSummary, Request, RequestEnvelope, Response, ResponseEnvelope, MAX_REQUEST_BYTES,
+    PROTOCOL_VERSION,
 };
 use std::os::unix::fs::FileTypeExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -277,6 +278,7 @@ impl BrokerState {
                 },
             }),
             Request::AuditRecent { username, limit } => self.audit_recent(peer, username, limit),
+            Request::Users => self.users(peer),
             Request::Match {
                 username,
                 auth_scope,
@@ -901,6 +903,115 @@ impl BrokerState {
         }
     }
 
+    fn users(&self, peer: Option<PeerCredentials>) -> ResponseEnvelope {
+        let Some(peer) = peer else {
+            return unauthorized();
+        };
+        let expected = facegate_ids().ok();
+        let usernames = if peer.uid == 0 {
+            match self.storage_usernames() {
+                Ok(usernames) => usernames,
+                Err(e) => return storage_error(e),
+            }
+        } else {
+            match username_for_uid(peer.uid) {
+                Ok(Some(username)) => vec![username],
+                Ok(None) => return unauthorized(),
+                Err(_) => return unauthorized(),
+            }
+        };
+
+        let mut users = Vec::new();
+        for username in usernames {
+            match self.user_summary(&username, expected) {
+                Ok(Some(summary)) => users.push(summary),
+                Ok(None) => {}
+                Err(e) => return storage_error(e),
+            }
+        }
+        users.sort_by(|a, b| a.username.cmp(&b.username));
+        ResponseEnvelope::ok(Response::Users { users })
+    }
+
+    fn storage_usernames(&self) -> std::result::Result<Vec<String>, FaceRsError> {
+        let mut usernames = Vec::new();
+        let entries = match fs::read_dir(&self.storage_base_dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(usernames),
+            Err(e) => {
+                return Err(FaceRsError::Storage(format!(
+                    "cannot read {}: {e}",
+                    self.storage_base_dir.display()
+                )));
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(|e| FaceRsError::Storage(e.to_string()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|e| FaceRsError::Storage(e.to_string()))?;
+            if !file_type.is_dir() {
+                continue;
+            }
+            let Some(username) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            usernames.push(username.to_owned());
+        }
+        Ok(usernames)
+    }
+
+    fn user_summary(
+        &self,
+        username: &str,
+        expected: Option<(u32, u32)>,
+    ) -> std::result::Result<Option<EnrolledUserSummary>, FaceRsError> {
+        let mut store = self.store().load(username)?;
+        if store.templates.is_empty() {
+            return Ok(None);
+        }
+        let mut scopes = Vec::new();
+        for scope in [
+            TemplateScope::Sudo,
+            TemplateScope::Session,
+            TemplateScope::Both,
+        ] {
+            if store
+                .templates
+                .iter()
+                .any(|template| template.scope == scope)
+            {
+                scopes.push(ipc_template_scope(scope));
+            }
+        }
+        let first_enrolled_at = store
+            .templates
+            .iter()
+            .map(|template| template.created_at.as_str())
+            .min()
+            .map(str::to_owned);
+        let last_enrolled_at = store
+            .templates
+            .iter()
+            .map(|template| template.created_at.as_str())
+            .max()
+            .map(str::to_owned);
+        let user_dir = self.storage_base_dir.join(username);
+        let embeddings_file = user_dir.join("embeddings.json");
+        let summary = EnrolledUserSummary {
+            username: username.to_owned(),
+            template_count: store.templates.len(),
+            scopes,
+            first_enrolled_at,
+            last_enrolled_at,
+            directory: ownership_summary(&user_dir, expected, 0o700),
+            embeddings_file: ownership_summary(&embeddings_file, expected, 0o600),
+        };
+        self.zeroize_templates(&mut store.templates);
+        Ok(Some(summary))
+    }
+
     fn remove(
         &self,
         peer: Option<PeerCredentials>,
@@ -1154,6 +1265,35 @@ fn authorized_for_user_or_root(peer: Option<PeerCredentials>, username: &str) ->
     peer.uid == 0 || uid_for_username(username).ok().flatten() == Some(peer.uid)
 }
 
+fn username_for_uid(uid: u32) -> Result<Option<String>> {
+    let mut buf = vec![0i8; 4096];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+
+    let rc = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &mut pwd,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 {
+        anyhow::bail!(
+            "getpwuid_r failed for uid {uid}: {}",
+            std::io::Error::from_raw_os_error(rc)
+        );
+    }
+    if result.is_null() {
+        return Ok(None);
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) }
+        .to_string_lossy()
+        .into_owned();
+    Ok(Some(name))
+}
+
 fn uid_for_username(username: &str) -> Result<Option<u32>> {
     let c_name =
         CString::new(username).with_context(|| format!("invalid username '{username}'"))?;
@@ -1178,6 +1318,50 @@ fn uid_for_username(username: &str) -> Result<Option<u32>> {
     } else {
         Ok(Some(pwd.pw_uid))
     }
+}
+
+fn facegate_ids() -> Result<(u32, u32)> {
+    let uid = uid_for_username("facegate")?.unwrap_or(0);
+    let c_name = CString::new("facegate")?;
+    let mut buf = vec![0i8; 4096];
+    let mut grp: libc::group = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::group = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getgrnam_r(
+            c_name.as_ptr(),
+            &mut grp,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 {
+        anyhow::bail!(
+            "getgrnam_r failed for facegate: {}",
+            std::io::Error::from_raw_os_error(rc)
+        );
+    }
+    let gid = if result.is_null() { 0 } else { grp.gr_gid };
+    Ok((uid, gid))
+}
+
+fn ownership_summary(
+    path: &Path,
+    expected: Option<(u32, u32)>,
+    expected_mode: u32,
+) -> Option<OwnershipSummary> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    let mode = meta.permissions().mode() & 0o777;
+    let (expected_uid, expected_gid) = expected.unwrap_or((meta.uid(), meta.gid()));
+    Some(OwnershipSummary {
+        uid: meta.uid(),
+        gid: meta.gid(),
+        mode,
+        ok: meta.uid() == expected_uid
+            && meta.gid() == expected_gid
+            && mode == expected_mode
+            && !meta.file_type().is_symlink(),
+    })
 }
 
 fn unauthorized() -> ResponseEnvelope {
@@ -1452,6 +1636,35 @@ mod tests {
         let json = serde_json::to_string(&ResponseEnvelope::ok(Response::List { templates }))
             .expect("serialize");
         assert!(!json.contains("embedding"));
+    }
+
+    #[test]
+    fn users_lists_metadata_without_embeddings() {
+        let (_dir, state) = test_state();
+        let peer = Some(PeerCredentials { uid: 0 });
+        state.dispatch(
+            RequestEnvelope::new(Request::Enroll {
+                username: "alice".to_owned(),
+                label: "sudo".to_owned(),
+                scope: IpcTemplateScope::Sudo,
+                embedding: unit_vec(&[1.0, 0.0]),
+            }),
+            peer,
+        );
+
+        let response = state.dispatch(RequestEnvelope::new(Request::Users), peer);
+        let Response::Users { users } = response.response else {
+            panic!("expected users response");
+        };
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].username, "alice");
+        assert_eq!(users[0].template_count, 1);
+        assert_eq!(users[0].scopes, vec![IpcTemplateScope::Sudo]);
+
+        let json = serde_json::to_string(&ResponseEnvelope::ok(Response::Users { users }))
+            .expect("serialize users response");
+        assert!(json.contains("alice"));
+        assert!(!json.contains("embedding\":"));
     }
 
     #[test]

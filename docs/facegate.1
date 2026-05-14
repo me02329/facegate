@@ -316,6 +316,15 @@ ownership and private modes to
 and
 .IR /var/lib/facegate/audit.log .
 .TP
+.B users
+List enrolled users through the broker, including template count, scopes,
+first/last enrollment timestamps, and ownership/mode state for each user's
+template directory and
+.IR embeddings.json .
+Use
+.B --json
+for script-friendly output.
+.TP
 .B list \fIUSERNAME\fR
 List enrolled templates for
 .IR USERNAME ,

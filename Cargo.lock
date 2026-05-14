@@ -706,6 +706,7 @@ dependencies = [
  "futures-util",
  "libc",
  "ratatui",
+ "serde_json",
  "thiserror",
  "tokio",
  "toml",

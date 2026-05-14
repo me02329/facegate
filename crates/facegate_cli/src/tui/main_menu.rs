@@ -64,6 +64,7 @@ enum Action {
     AddSudo,
     AddSession,
     AddBoth,
+    Users,
     List,
     Forget,
     Test,
@@ -174,6 +175,14 @@ fn build_items(sudo_enabled: bool, session_enabled: bool, watch_active: bool) ->
             kind: ItemKind::Action,
         },
         section("Templates"),
+        MenuItem {
+            icon: "@ ",
+            label: "Enrolled Users",
+            description: "List all enrolled users and broker storage ownership".into(),
+            action: Some(Action::Users),
+            needs_user: false,
+            kind: ItemKind::Action,
+        },
         MenuItem {
             icon: "= ",
             label: "Templates",
@@ -879,6 +888,7 @@ impl<'a> App<'a> {
                     &tx,
                 ),
                 Action::List => commands::list::run_streaming(&config, username.as_deref(), &tx),
+                Action::Users => commands::users::run_streaming(&tx),
                 Action::Forget => match username.as_deref() {
                     Some(username) => commands::forget::run_streaming(&config, username, true, &tx),
                     None => Err(anyhow::anyhow!("missing username")),

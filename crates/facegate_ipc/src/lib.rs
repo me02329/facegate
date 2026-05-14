@@ -43,6 +43,25 @@ pub struct EnrolledTemplateSummary {
     pub scope: TemplateScope,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnershipSummary {
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: u32,
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrolledUserSummary {
+    pub username: String,
+    pub template_count: usize,
+    pub scopes: Vec<TemplateScope>,
+    pub first_enrolled_at: Option<String>,
+    pub last_enrolled_at: Option<String>,
+    pub directory: Option<OwnershipSummary>,
+    pub embeddings_file: Option<OwnershipSummary>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MatchResult {
     pub matched: bool,
@@ -131,6 +150,7 @@ pub enum Request {
         username: Option<String>,
         limit: u32,
     },
+    Users,
     Match {
         username: String,
         auth_scope: AuthScope,
@@ -245,6 +265,9 @@ pub enum Response {
     },
     List {
         templates: Vec<EnrolledTemplateSummary>,
+    },
+    Users {
+        users: Vec<EnrolledUserSummary>,
     },
     Removed,
     Error(BrokerError),
@@ -433,5 +456,34 @@ mod tests {
         let json = serde_json::to_string(&response).expect("serialize");
         assert!(json.contains("front"));
         assert!(!json.contains("embedding"));
+    }
+
+    #[test]
+    fn users_response_exposes_metadata_only() {
+        let response = ResponseEnvelope::ok(Response::Users {
+            users: vec![EnrolledUserSummary {
+                username: "alice".to_owned(),
+                template_count: 2,
+                scopes: vec![TemplateScope::Sudo, TemplateScope::Session],
+                first_enrolled_at: Some("2026-05-11T00:00:00Z".to_owned()),
+                last_enrolled_at: Some("2026-05-12T00:00:00Z".to_owned()),
+                directory: Some(OwnershipSummary {
+                    uid: 123,
+                    gid: 123,
+                    mode: 0o700,
+                    ok: true,
+                }),
+                embeddings_file: Some(OwnershipSummary {
+                    uid: 123,
+                    gid: 123,
+                    mode: 0o600,
+                    ok: true,
+                }),
+            }],
+        });
+
+        let json = serde_json::to_string(&response).expect("serialize");
+        assert!(json.contains("alice"));
+        assert!(!json.contains("embedding\":"));
     }
 }

@@ -69,8 +69,7 @@ We consider the following classes of issues in scope:
   broker disabled, or skip checksum verification on downloaded models
   (see also [issue #13][issue-13]).
 - Recovery and rollback failures: a broken PAM edit that cannot be
-  reverted with `session-auth --off` or `facegate emergency-disable`
-  (planned, [#34][issue-34]).
+  reverted with `session-auth` or `facegate emergency-disable`.
 
 ## What is out of scope (for now)
 
@@ -80,9 +79,9 @@ These limitations are publicly documented and tracked in
 - **Liveness / presentation attack detection.** A high-quality photo or
   replay can still match a single-camera capture (`06-liveness-pad.md`,
   [#25][issue-25]).
-- **Dual-stream RGB+IR cross-check.** Not yet implemented on laptops
-  with both sensors (`09-dual-camera-cross-check.md`, [#28][issue-28],
-  planned for v0.3.0).
+- **Full PAD/liveness model integration.** RGB+IR cross-check is defense in
+  depth, but it is not a full PAD model (`06-liveness-pad.md`,
+  [#25][issue-25]).
 - **TPM sealing of templates at rest.** Templates are protected by
   Unix file permissions but not yet sealed to platform state
   (`07-tpm-sealing.md`, [#26][issue-26]).
@@ -124,36 +123,18 @@ at [`docs/recovery.md`](docs/recovery.md).
 
 ## Threat model
 
-A short overview of the threat model lives in this document; the full
-version is tracked as [#38][issue-38] and will move to
-`docs/threat-model.md` when written.
-
-**Assets**: enrolled biometric templates, the audit log, the broker
-socket, the PAM trust decision.
-
-**In-scope adversaries**:
-
-- *Remote network*: assumed to have no path to Facegate (no listening
-  socket, no network exposure on `facegate-brokerd`).
-- *Same-host different-UID*: cannot read templates (broker-owned),
-  cannot inject D-Bus `Lock` signals (logind-only sender), cannot
-  call `Unlock()` on someone else's session (polkit-enforced).
-- *Same-UID*: cannot read templates, cannot fabricate a match via a
-  precomputed embedding (`Match` restricted to uid=0; non-root must
-  use `MatchFrame` with a real camera frame), is rate-limited by the
-  broker per UID and per username.
-- *Root*: out of scope. Root can do anything; password auth is the
-  ultimate fallback.
-
-**Explicit non-goals for the current release**: liveness / PAD,
-dual-camera cross-check, TPM-sealed templates at rest. See the issues
-linked above.
+The full threat model lives at [`docs/threat-model.md`](docs/threat-model.md).
+The broker IPC protocol is documented at
+[`docs/ipc-protocol.md`](docs/ipc-protocol.md).
 
 ## See also
 
 - [`README.md`](README.md) — Security section.
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes including the v0.2.0
   trust-boundary move.
+- [`docs/threat-model.md`](docs/threat-model.md) — assets, adversaries,
+  mitigations, and roadmap mapping.
+- [`docs/ipc-protocol.md`](docs/ipc-protocol.md) — broker socket protocol.
 - [`docs/security-issues/`](docs/security-issues) — public hardening
   roadmap.
 

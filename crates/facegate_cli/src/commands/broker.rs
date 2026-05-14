@@ -4,8 +4,9 @@ use facegate_core::config::Config;
 use facegate_core::error::FaceRsError;
 use facegate_core::storage::{AuthScope, EnrolledTemplate, TemplateScope};
 use facegate_ipc::{
-    send_request, AuditEvent, BrokerError, EnrolledTemplateSummary, ErrorCode, FrameFormat,
-    FrameProbe, MatchReason, MatchResult, Request, RequestEnvelope, Response, DEFAULT_SOCKET_PATH,
+    send_request, AuditEvent, BrokerError, EnrolledTemplateSummary, EnrolledUserSummary, ErrorCode,
+    FrameFormat, FrameProbe, MatchReason, MatchResult, Request, RequestEnvelope, Response,
+    DEFAULT_SOCKET_PATH,
 };
 
 /// Wrap a freshly captured `Frame` in a `FrameProbe`. The capture timestamp
@@ -155,6 +156,13 @@ pub fn list_templates(username: &str) -> Result<Vec<EnrolledTemplateSummary>> {
         username: username.to_owned(),
     })? {
         Response::List { templates } => Ok(templates),
+        other => bail!("unexpected broker response: {other:?}"),
+    }
+}
+
+pub fn list_users() -> Result<Vec<EnrolledUserSummary>> {
+    match request(Request::Users)? {
+        Response::Users { users } => Ok(users),
         other => bail!("unexpected broker response: {other:?}"),
     }
 }

@@ -57,6 +57,7 @@ Facegate lets you authenticate with your face for `sudo`, login sessions, and sc
 - Guided first-time setup flow (`facegate setup`) covering camera selection, enrolment, and PAM wiring
 - Threshold calibration command (`facegate calibrate`) that recommends a recognition threshold from live positive samples
 - Compact installation summary (`facegate status`) including broker reachability, model presence, enrolled templates, and recent audit events
+- Admin enrollment overview (`facegate users`) showing all enrolled users and broker storage ownership state
 - Multi-sample enrollment with separate templates per capture for better accuracy
 - Per-template auth scopes (`sudo`, `session`, or `both`)
 - ArcFace embeddings + SCRFD face detector (ONNX Runtime, fully on-device)
@@ -350,6 +351,7 @@ systemctl --user enable --now facegate-watch
 | `status` | Compact installation, broker reachability, and enrolment summary (also shows recent audit events) |
 | `logs [--lines N]` | Show the current user's local diagnostic log |
 | `emergency-disable [--dry-run]` | Restore Facegate PAM backups, remove remaining Facegate PAM lines, and stop services |
+| `users [--json]` | List enrolled users and broker storage ownership state |
 | `broker status` | Show broker service, socket, audit log, and storage status |
 | `broker health` | Ping the broker over IPC and print version/protocol |
 | `broker restart` | Restart `facegate-brokerd.service` |
@@ -369,7 +371,7 @@ systemctl --user enable --now facegate-watch
 | `completions SHELL` | Print shell completion script |
 
 All commands except `completions`, `cameras`, `status`, `logs`,
-`broker status`, `broker health`, `broker logs`, and the internal
+`users`, `broker status`, `broker health`, `broker logs`, and the internal
 `watch`/`auth` helpers require root. `cameras`, `status`, `logs`, and `watch` run as
 the normal user. If PAM recovery is needed, see
 [`docs/recovery.md`](docs/recovery.md) and start with
@@ -488,7 +490,7 @@ threshold from real positive samples rather than guessing at
 facegate/
 ├── crates/
 │   ├── facegate_core/      # camera, detection, embedding, matching, storage, config
-│   ├── facegate_ipc/       # versioned JSON-over-Unix-socket protocol (v3)
+│   ├── facegate_ipc/       # versioned JSON-over-Unix-socket protocol (v5)
 │   ├── facegate_brokerd/   # privileged broker daemon (facegate-brokerd)
 │   ├── facegate_cli/       # CLI + TUI + watch daemon (facegate binary)
 │   └── pam_facegate/       # PAM module (pam_facegate.so)
@@ -507,7 +509,7 @@ facegate/
 
 **`facegate_core`** handles the full ML pipeline: V4L2 capture, SCRFD face detection, ArcFace embedding extraction, cosine similarity matching, and secure template storage. Since v0.2.0 the detector + embedder are linked **only** into `facegate-brokerd`; the CLI and PAM helper rely on `facegate_core` exclusively for the V4L2 capture side.
 
-**`facegate_ipc`** defines the versioned JSON-over-Unix-socket protocol between clients and the broker. Protocol version is **v3**; mismatched clients are rejected with `VersionMismatch`. Reinstall both the broker and the CLI together when upgrading.
+**`facegate_ipc`** defines the versioned JSON-over-Unix-socket protocol between clients and the broker. Protocol version is **v5**; mismatched clients are rejected with `VersionMismatch`. Reinstall both the broker and the CLI together when upgrading. See [`docs/ipc-protocol.md`](docs/ipc-protocol.md).
 
 **`facegate_brokerd`** is the new privileged broker (a system service started by systemd). It runs as the dedicated `facegate` user, owns all enrolled templates, performs face detection / embedding / matching on submitted frames, enforces rate limiting and lockouts, and writes the audit log. It does **not** open camera devices itself — frames arrive over the IPC socket.
 
@@ -518,6 +520,8 @@ facegate/
 ---
 
 ## Security
+
+For the detailed threat model, see [`docs/threat-model.md`](docs/threat-model.md).
 
 ### What Facegate is
 
@@ -560,11 +564,11 @@ client (any UID)          ──MatchFrame(raw frame)──▶   facegate-broker
 - **Frame envelopes are sanity-checked**: `MatchFrame` rejects frames
   whose declared geometry exceeds 4096² or whose buffer length
   disagrees with `width × height × bytes-per-pixel`. The request size
-  cap is 12 MB (enough for 1080p RGB after base64).
+  cap is 24 MB (enough for synchronized RGB+IR 1080p frames after base64).
 - **Peer credentials are enforced via `SO_PEERCRED`**, so the broker
   knows which UID owns each connection and can apply per-UID and
   per-username rate limits / lockouts.
-- **IPC protocol is versioned (v3).** A mismatched client is rejected
+- **IPC protocol is versioned (v5).** A mismatched client is rejected
   with `VersionMismatch`; you must reinstall the CLI and the broker
   together.
 
