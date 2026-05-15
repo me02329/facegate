@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use image::imageops::FilterType;
 use image::{ImageBuffer, Rgb};
 use ndarray::Array4;
 use ort::session::{builder::GraphOptimizationLevel, Session};
@@ -159,8 +158,8 @@ fn warp_affine(
 // ── Preprocessing for ArcFace ─────────────────────────────────────────────────
 
 fn to_tensor(img: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<Array4<f32>> {
-    // Resize to 112×112 just in case alignment produced a different size
-    let img = image::imageops::resize(img, FACE_SIZE, FACE_SIZE, FilterType::Triangle);
+    debug_assert_eq!(img.width(), FACE_SIZE);
+    debug_assert_eq!(img.height(), FACE_SIZE);
     let sz = FACE_SIZE as usize;
 
     // NCHW, RGB, normalised: (pixel / 255 - 0.5) / 0.5  →  [-1, 1]
