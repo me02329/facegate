@@ -69,7 +69,14 @@ Stored embeddings are never returned by `list` or `users`.
 
 - `format`: `rgb8`, `bgr8`, or `gray8`
 - `width`, `height`
-- `captured_at_ms`: client capture timestamp in milliseconds since epoch
+- `captured_at_ms`: client capture timestamp in milliseconds since the
+  UNIX epoch. **Zero is a reserved sentinel meaning "not provided"** —
+  any `MatchFramePair` with `captured_at_ms == 0` on either side is
+  rejected with `CrossCheckTimeSkew`, which lets legacy v2 clients fall
+  back cleanly without bumping the protocol version. New clients MUST
+  populate this from a real wall-clock source (any post-1970
+  `SystemTime::now` in milliseconds is non-zero, so the sentinel never
+  collides with real data).
 - `bytes`: base64-encoded raw frame bytes
 
 The broker rejects malformed geometry, oversized geometry above 4096 x 4096,

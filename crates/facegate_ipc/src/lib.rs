@@ -192,9 +192,17 @@ pub struct FrameProbe {
     /// client's clock. Used by the broker for the cross-check sync window
     /// (`[camera.cross_check].max_time_skew_ms`). Both frames of a
     /// `MatchFramePair` MUST come from the same client clock; the broker
-    /// compares their absolute difference and treats `0` as "missing"
-    /// (legacy v2 client → cross-check rejected). For a single `MatchFrame`
-    /// the value is informational.
+    /// compares their absolute difference. For a single `MatchFrame` the
+    /// value is informational.
+    ///
+    /// **Zero is a reserved sentinel meaning "not provided"**: the broker
+    /// rejects any `MatchFramePair` where either side has `captured_at_ms ==
+    /// 0` with `CrossCheckTimeSkew`, so legacy clients that did not populate
+    /// this field on the v2 wire format fall back cleanly. New clients MUST
+    /// populate this with a real wall-clock value (any real `SystemTime::now`
+    /// in milliseconds since 1970-01-01 is non-zero, so no in-band collision
+    /// is possible). Do not switch to `Option<u64>` without bumping
+    /// `PROTOCOL_VERSION`.
     #[serde(default)]
     pub captured_at_ms: u64,
     #[serde(with = "base64_bytes")]
