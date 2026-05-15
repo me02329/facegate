@@ -7,6 +7,35 @@ on a best-effort basis while the IPC protocol stabilises.
 
 ## [Unreleased]
 
+### Fixed
+
+- PAM helper no longer cuts off legitimate sudo + cross-check auth runs.
+  The 25 s hard timeout in `pam_facegate.so` was sized for the RGB-only
+  defaults and broke under `[recognition.sudo].max_attempts = 5` with
+  `[camera.cross_check].enabled = true`, where the inner capture-retry
+  loop legitimately needs up to ~75 s. `facegate auth` now derives its
+  own deadline from the effective recognition policy and camera config
+  and bails cleanly with `AuthExitCode::Timeout`; the PAM module's hard
+  cap is demoted to a 180 s "helper hung" safety net. `facegate doctor`
+  surfaces the worst-case sudo and session waits. (#53)
+- `match_frame_pair` requests landing on a broker that does not require
+  cross-check are now refused with `bad_request` instead of silently
+  downgrading to a single-RGB match; the previous behaviour hid the
+  client/broker config mismatch, wasted the IR capture, and mislabelled
+  the audit event. (#53)
+- ArcFace face alignment now uses bilinear sampling instead of
+  nearest-neighbour, recovering a few percent of cosine similarity on
+  tilted faces and matching the resampling the model was trained
+  against. (#53)
+- Removed a dead 112×112-to-112×112 resize that allocated a buffer copy
+  on every embedding call. (#53)
+
+### Documentation
+
+- `FrameProbe::captured_at_ms` now documents the `0` sentinel
+  ("not provided") explicitly in both rustdoc and
+  `docs/ipc-protocol.md`. (#53)
+
 ## [0.3.1] — 2026-05-15
 
 Distribution-only release: no runtime or behavioural changes. Hardens
