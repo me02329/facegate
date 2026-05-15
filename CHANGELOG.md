@@ -7,6 +7,12 @@ on a best-effort basis while the IPC protocol stabilises.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-05-15
+
+Distribution-only release: no runtime or behavioural changes. Hardens
+the release pipeline so downstream packagers (AUR, COPR, OBS, mirrors)
+can verify what they pull and reproduce the artifact set.
+
 ### Added
 
 - Release pipeline now produces a source tarball (`facegate-<ver>.tar.gz`)
@@ -21,6 +27,8 @@ on a best-effort basis while the IPC protocol stabilises.
   missing.
 - Dependabot tracks GitHub Actions and Cargo dependencies weekly,
   targeting `dev`.
+- README *Verify before installing* section documenting the
+  `sha256sum -c` and `gh attestation verify` flows.
 
 ### Changed
 

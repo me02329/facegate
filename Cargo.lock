@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "facegate_brokerd"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "facegate_core",
@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "facegate_cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -718,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "facegate_core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "image",
@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "facegate_ipc"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64",
  "serde",
@@ -1544,7 +1544,7 @@ dependencies = [
 
 [[package]]
 name = "pam_facegate"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libc",
 ]
