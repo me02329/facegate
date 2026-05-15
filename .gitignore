@@ -28,6 +28,9 @@ facegate-*.tmp
 # PUBLISHING.local.md for what lives here.
 *.local.md
 
+# AI-assistant context file (generated per-developer, not part of the project)
+CLAUDE.md
+
 # mdBook output (built by .github/workflows/pages.yml in CI)
 /docs/book/book/
 
