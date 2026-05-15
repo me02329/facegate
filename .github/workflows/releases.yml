@@ -11,8 +11,12 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# id-token + attestations are needed for keyless Sigstore signing via
+# actions/attest-build-provenance. contents:write lets us draft the release.
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   packages:
@@ -30,16 +34,19 @@ jobs:
       NFPM_VERSION: "2.43.0"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@master
+      # dtolnay/rust-toolchain has no versioned tags; pinning to master is
+      # mandatory for supply-chain safety even though the action README
+      # documents @master usage. Bump together with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master @ 2026-05-15
         with:
           toolchain: "1.95.0"
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@400e7407cfd7a091e5fbb6afec01ec146c432b7c # v2.7.7
 
       - name: Install nFPM (pre-built binary)
         run: |
@@ -70,15 +77,62 @@ jobs:
             exit 1
           fi
 
+      # Fail early if the release-notes section is missing — packagers and
+      # mirror sites pull the GitHub release body, so an empty body is a
+      # poor first impression and we'd rather block the build than ship one.
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { p=1; next }
+            p && /^## \[/         { exit }
+            p                     { print }
+          ' CHANGELOG.md > release-notes.md
+
+          # Strip leading/trailing blank lines.
+          sed -i -e '/./,$!d' -e :a -e '/^\n*$/{$d;N;ba' -e '}' release-notes.md || true
+
+          if [ ! -s release-notes.md ]; then
+            echo "::error::No '## [${version}]' section found in CHANGELOG.md" >&2
+            exit 1
+          fi
+
+          echo "---- release-notes.md ----"
+          cat release-notes.md
+          echo "--------------------------"
+
       - name: Build packages
         env:
           FACEGATE_VERSION: ${{ steps.version.outputs.version }}
         run: scripts/package-nfpm.sh
 
+      - name: Build source tarball
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          git archive \
+            --format=tar.gz \
+            --prefix="facegate-${version}/" \
+            -o "dist/facegate-${version}.tar.gz" \
+            HEAD
+          ls -lh "dist/facegate-${version}.tar.gz"
+
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@df80a981bc6edbc4e220a492d3cbe9f5547a6e75 # v0.17.9
+        with:
+          path: .
+          format: cyclonedx-json
+          artifact-name: facegate-${{ steps.version.outputs.version }}.cdx.json
+          output-file: dist/facegate-${{ steps.version.outputs.version }}.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum *.deb *.rpm *.pkg.tar.zst > checksums.sha256
+          sha256sum \
+            *.deb *.rpm *.pkg.tar.zst *.tar.gz *.cdx.json \
+            > checksums.sha256
           cat checksums.sha256
 
       - name: Import GPG key
@@ -88,23 +142,37 @@ jobs:
       - name: Sign packages
         if: env.HAS_GPG_KEY == 'true'
         run: |
-          for f in dist/*.deb dist/*.rpm dist/*.pkg.tar.zst; do
+          for f in dist/*.deb dist/*.rpm dist/*.pkg.tar.zst dist/*.tar.gz dist/checksums.sha256; do
             echo "${{ secrets.GPG_PASSPHRASE }}" \
               | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --detach-sign --armor "$f"
           done
 
+      # Sigstore keyless signing — produces a verifiable attestation bound to
+      # this GitHub Actions run. Consumers verify with `gh attestation verify`.
+      # Independent of, and complementary to, the optional GPG signatures.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.pkg.tar.zst
+            dist/*.tar.gz
+            dist/*.cdx.json
+
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
         with:
           name: facegate-packages
           path: dist/*
 
       - name: Create draft release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: v${{ steps.version.outputs.version }}
           draft: true
+          body_path: release-notes.md
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

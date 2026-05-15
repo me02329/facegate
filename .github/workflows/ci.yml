@@ -39,17 +39,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # Pin to the same compiler version recorded in rust-toolchain.toml so
       # local and CI builds stay in lockstep. Bump both at the same time.
-      - uses: dtolnay/rust-toolchain@master
+      # dtolnay/rust-toolchain has no versioned tags; pinning the action to
+      # a master SHA is the supply-chain-safe equivalent.
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master @ 2026-05-15
         with:
           toolchain: "1.95.0"
           components: rustfmt, clippy
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@400e7407cfd7a091e5fbb6afec01ec146c432b7c # v2.7.7
 
       - name: Check formatting
         run: cargo fmt --check

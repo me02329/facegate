@@ -7,6 +7,35 @@ on a best-effort basis while the IPC protocol stabilises.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-05-15
+
+Distribution-only release: no runtime or behavioural changes. Hardens
+the release pipeline so downstream packagers (AUR, COPR, OBS, mirrors)
+can verify what they pull and reproduce the artifact set.
+
+### Added
+
+- Release pipeline now produces a source tarball (`facegate-<ver>.tar.gz`)
+  and a CycloneDX SBOM (`facegate-<ver>.cdx.json`) alongside the
+  `.deb` / `.rpm` / `.pkg.tar.zst` archives. Both are included in
+  `checksums.sha256` and covered by the build provenance attestation.
+- Sigstore keyless build provenance attestation for every release
+  artifact via `actions/attest-build-provenance`. Consumers verify with
+  `gh attestation verify <file> --repo me02329/facegate`.
+- Release body is now auto-extracted from the matching `## [X.Y.Z]`
+  section in `CHANGELOG.md`; releases fail fast if the section is
+  missing.
+- Dependabot tracks GitHub Actions and Cargo dependencies weekly,
+  targeting `dev`.
+- README *Verify before installing* section documenting the
+  `sha256sum -c` and `gh attestation verify` flows.
+
+### Changed
+
+- All third-party GitHub Actions are now pinned to immutable commit
+  SHAs with a tag-version comment, eliminating the previous
+  `dtolnay/rust-toolchain@master` mutable ref.
+
 ## [0.3.0] — 2026-05-14
 
 This release focuses on operator tooling (broker subcommands,
