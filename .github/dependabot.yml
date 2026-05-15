@@ -1,0 +1,31 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    target-branch: dev
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    target-branch: dev
+    commit-message:
+      prefix: deps
+    # Patch + minor only; majors land via tracked issues so breaking changes
+    # get a manual review against the broker/PAM surface.
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major

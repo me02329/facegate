@@ -123,6 +123,27 @@ script creates the `facegate:facegate` system user, fetches the ONNX
 Runtime shared library and the SCRFD + ArcFace ONNX models from a
 configured mirror, and enables `facegate-brokerd.service`.
 
+### Verify before installing
+
+Every release ships a `checksums.sha256` file and a Sigstore build
+provenance attestation bound to the GitHub Actions run that produced
+it. To verify a downloaded `.deb` (replace with `.rpm` / `.pkg.tar.zst`
+as needed):
+
+```sh
+# 1. SHA256
+sha256sum -c checksums.sha256 --ignore-missing
+
+# 2. Sigstore build provenance (requires `gh` CLI ≥ 2.49)
+gh attestation verify facegate_*.deb --repo me02329/facegate
+```
+
+A valid attestation proves the artifact was built by this repo's
+`Release packages` workflow on a tagged commit — keyless, no GPG key
+required. When a release GPG key is configured upstream, detached
+`.asc` signatures are attached alongside the artifacts as a second,
+independent trust path.
+
 For development from a clone:
 
 ```sh
