@@ -8,6 +8,11 @@
 *.rpm
 *.pkg.tar.zst
 
+# AUR makepkg working dirs and downloaded sources (per-PKGBUILD dir)
+packaging/aur/*/pkg/
+packaging/aur/*/src/
+packaging/aur/*/checksums.sha256-*
+
 # Ad-hoc backups left by session-auth / manual PAM edits
 *.bak
 *.orig

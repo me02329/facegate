@@ -14,6 +14,10 @@ optdepends=(
 )
 provides=("${_pkgname}=${pkgver}")
 conflicts=("${_pkgname}" "${_pkgname}-git")
+# Upstream binaries are already stripped by `cargo build --release` +
+# debian's dh_strip; skip Arch's strip pass and the auto-generated
+# -debug package (which would be empty anyway).
+options=('!debug' '!strip')
 install="${_pkgname}.install"
 # We pull the .deb that the upstream Release workflow publishes — it is
 # the same payload as the .pkg.tar.zst but without pacman metadata, so we
@@ -25,7 +29,8 @@ source=(
 )
 # Run `updpkgsums` after bumping pkgver to refresh these. SKIP is a
 # placeholder — never publish with SKIP if you care about supply chain.
-sha256sums=('SKIP' 'SKIP')
+sha256sums=('16be0bd3e002c1873a658399b73e113dea487b974b9638faf5ca88065664d3bd'
+            'eac5315f644056863d8d56664ea6f6963afa241b53b67f465eb7e2f7d3a56656')
 
 package() {
     cd "${srcdir}"
