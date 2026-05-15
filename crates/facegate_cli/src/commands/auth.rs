@@ -1,4 +1,6 @@
-use facegate_core::config::Config;
+use std::time::{Duration, Instant};
+
+use facegate_core::config::{Config, EffectiveRecognitionPolicy};
 use facegate_core::error::{AuthExitCode, FaceRsError};
 use facegate_core::storage::AuthScope;
 use facegate_ipc::ErrorCode;
@@ -8,7 +10,43 @@ use crate::commands::broker::{
 };
 use crate::commands::{broker, user_log};
 
-const CROSS_CHECK_CAPTURE_RETRIES: u32 = 3;
+pub(crate) const CROSS_CHECK_CAPTURE_RETRIES: u32 = 3;
+
+/// Fixed inference + IPC slack added to each outer attempt's capture
+/// budget when computing the auth deadline. SCRFD + ArcFace + the Unix
+/// socket round-trip is well under 1 s on the test hardware; we err
+/// generous because the cost of bailing too early is a frustrated user
+/// who has to type their password despite recognition being moments
+/// away from succeeding.
+const INFERENCE_SLACK_PER_ATTEMPT_MS: u64 = 1000;
+
+/// Worst-case wall-clock budget the helper allows itself before bailing
+/// with `AuthExitCode::Timeout`. The PAM module's `HELPER_TIMEOUT_SECS`
+/// is a coarser safety net set above this value so the helper is always
+/// the side that decides when to give up — the PAM kill is reserved for
+/// "the helper hung" cases. Exposed for `facegate doctor` so it can
+/// surface the configured worst-case to operators.
+pub(crate) fn auth_budget(config: &Config, policy: &EffectiveRecognitionPolicy) -> Duration {
+    let rgb_timeout_ms = config.camera.timeout_ms;
+    let per_attempt_ms: u64 = if cross_check_active(config) {
+        let ir_timeout_ms = config
+            .camera
+            .ir
+            .as_ref()
+            .map(|ir| ir.effective_timeout_ms(rgb_timeout_ms))
+            .unwrap_or(rgb_timeout_ms);
+        // The inner cross-check loop captures RGB and IR in parallel
+        // (std::thread::scope), so the slowest stream bounds capture
+        // time. Up to CROSS_CHECK_CAPTURE_RETRIES rounds per outer
+        // attempt before giving up on capture and moving to the next.
+        let slowest_capture_ms = ir_timeout_ms.max(rgb_timeout_ms);
+        CROSS_CHECK_CAPTURE_RETRIES as u64 * slowest_capture_ms
+    } else {
+        rgb_timeout_ms
+    };
+    let total_ms = policy.max_attempts as u64 * (per_attempt_ms + INFERENCE_SLACK_PER_ATTEMPT_MS);
+    Duration::from_millis(total_ms)
+}
 
 /// Non-interactive authentication called by the PAM module.
 /// Returns an exit code — caller must pass it to std::process::exit.
@@ -69,9 +107,25 @@ pub fn run(config: &Config, username: &str, service: Option<&str>) -> AuthExitCo
         None
     };
 
+    // Helper-side deadline. The PAM module above us also enforces a
+    // hard timeout, but it is set generously so this self-imposed
+    // deadline is the one that actually decides when to give up — that
+    // way the policy + camera config drive the user-visible wait, not
+    // a hard-coded number in `pam_facegate`.
+    let deadline = Instant::now() + auth_budget(config, &policy);
+
     let mut matches = 0_u32;
     let mut saw_timeout = false;
     for attempt in 1..=policy.max_attempts {
+        if Instant::now() >= deadline {
+            tracing::warn!(
+                attempt,
+                "auth deadline reached for '{username}' before completing all attempts"
+            );
+            user_log::append_for_user(username, format!("auth deadline_reached attempt={attempt}"));
+            saw_timeout = true;
+            break;
+        }
         let result = if let Some(ir_camera) = ir_camera.as_mut() {
             let mut selected = None;
             for capture_attempt in 1..=CROSS_CHECK_CAPTURE_RETRIES {
@@ -297,5 +351,81 @@ fn handle_broker_error(
             user_log::append_for_user(username, format!("auth broker_error error={other}"));
             AuthExitCode::InternalError
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use facegate_core::config::Config;
+
+    fn policy(max_attempts: u32) -> EffectiveRecognitionPolicy {
+        EffectiveRecognitionPolicy {
+            threshold: 0.55,
+            required_matches: 1,
+            max_attempts,
+        }
+    }
+
+    #[test]
+    fn budget_rgb_only_uses_camera_timeout() {
+        let mut config = Config::default();
+        config.camera.timeout_ms = 5000;
+        config.camera.ir = None;
+        config.camera.cross_check.enabled = false;
+
+        // max_attempts × (timeout_ms + INFERENCE_SLACK_PER_ATTEMPT_MS)
+        // = 3 × (5000 + 1000) = 18000 ms
+        assert_eq!(
+            auth_budget(&config, &policy(3)),
+            Duration::from_millis(18_000)
+        );
+    }
+
+    #[test]
+    fn budget_cross_check_multiplies_by_retries_and_picks_slowest_stream() {
+        let mut config = Config::default();
+        config.camera.timeout_ms = 5000;
+        config.camera.cross_check.enabled = true;
+        config.camera.ir = Some(facegate_core::config::CameraIrConfig {
+            device: "/dev/video2".to_owned(),
+            width: None,
+            height: None,
+            fps: None,
+            timeout_ms: Some(8000),
+            warmup_frames: None,
+            min_face_size: None,
+        });
+
+        // per_attempt = CROSS_CHECK_CAPTURE_RETRIES × max(5000, 8000)
+        //             = 3 × 8000 = 24000
+        // total = 5 × (24000 + 1000) = 125000 ms
+        assert_eq!(
+            auth_budget(&config, &policy(5)),
+            Duration::from_millis(125_000)
+        );
+    }
+
+    #[test]
+    fn budget_falls_back_to_rgb_when_cross_check_disabled() {
+        // Even with an IR section present, cross_check.enabled = false
+        // means we go down the single-frame path and budget like RGB-only.
+        let mut config = Config::default();
+        config.camera.timeout_ms = 5000;
+        config.camera.cross_check.enabled = false;
+        config.camera.ir = Some(facegate_core::config::CameraIrConfig {
+            device: "/dev/video2".to_owned(),
+            width: None,
+            height: None,
+            fps: None,
+            timeout_ms: Some(8000),
+            warmup_frames: None,
+            min_face_size: None,
+        });
+
+        assert_eq!(
+            auth_budget(&config, &policy(3)),
+            Duration::from_millis(18_000)
+        );
     }
 }

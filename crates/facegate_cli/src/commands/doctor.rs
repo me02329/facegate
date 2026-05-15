@@ -4,8 +4,11 @@ use std::sync::mpsc::Sender;
 use facegate_core::config::Config;
 use facegate_core::detection::ScrfdDetector;
 use facegate_core::embedding::ArcFaceEmbedder;
+use facegate_core::storage::AuthScope;
 use v4l::video::Capture;
 use v4l::Device;
+
+use crate::commands::auth::auth_budget;
 
 #[derive(Debug, Clone, Copy)]
 enum CameraKind {
@@ -258,6 +261,25 @@ pub fn run_streaming(
         service_installed,
         Some(reinstall_hint(distro)),
     );
+
+    // Surface the worst-case auth wait so an operator can see at a glance
+    // whether the configured policy is going to make face auth feel slow
+    // before the password prompt kicks in. The helper bails itself at
+    // this budget — the PAM module's safety net is set far above it.
+    let sudo_budget = auth_budget(config, &config.recognition.policy_for(AuthScope::Sudo));
+    let session_budget = auth_budget(config, &config.recognition.policy_for(AuthScope::Session));
+    out!("");
+    out!(
+        "worst-case auth wait before password fallback: sudo {:.1}s, session {:.1}s",
+        sudo_budget.as_secs_f32(),
+        session_budget.as_secs_f32(),
+    );
+    if sudo_budget.as_secs() > 30 {
+        out!(
+            "        → sudo budget is long; lower [recognition.sudo].max_attempts \
+             or [camera].timeout_ms if face auth feels sluggish"
+        );
+    }
 
     out!("");
     if all_ok {

@@ -33,11 +33,17 @@ const EXIT_DENIED: c_int = 6;
 /// Default helper binary path (overridable via `pam_facegate.so path=...`).
 const DEFAULT_HELPER_PATH: &str = "/usr/bin/facegate";
 
-/// Hard timeout for the helper process. Must be >= max_attempts × camera.timeout_ms
-/// in the facegate config plus a small slack for model load. With the defaults
-/// (3 attempts × 5 s + ~3 s init) 25 s is comfortable; 45 s was unnecessarily
-/// long and made password fallback feel sluggish on a missed face.
-const HELPER_TIMEOUT_SECS: u64 = 25;
+/// Safety-net timeout for the helper process. The helper computes its own
+/// deadline from the effective recognition policy and camera config (see
+/// `facegate_cli::commands::auth::auth_budget`) and bails with
+/// `AuthExitCode::Timeout` well before this value is reached, so the
+/// user-visible wait is driven by config, not by a constant here. This
+/// timeout only fires if the helper itself has hung — model loader stuck,
+/// kernel V4L2 driver hang, broker socket unresponsive — and is set
+/// generously enough to cover the worst-case legitimate config
+/// (`max_attempts = 5`, cross-check on with IR `timeout_ms = 8000` ⇒
+/// ~120 s plus slack) without ever cutting off a healthy auth run.
+const HELPER_TIMEOUT_SECS: u64 = 180;
 
 /// `pam_sm_authenticate` — called by PAM to authenticate the user.
 ///
