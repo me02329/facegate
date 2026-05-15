@@ -119,7 +119,12 @@ fn similarity_transform(src: &[(f32, f32); 5], dst: &[(f32, f32); 5]) -> (f32, f
     (a, b, tx, ty)
 }
 
-/// Warp image with similarity transform using nearest-neighbour sampling.
+/// Warp image with similarity transform using bilinear sampling.
+///
+/// Bilinear is the de-facto standard for ArcFace face alignment — the model
+/// was trained against bilinearly resampled crops, and switching from
+/// nearest-neighbour here recovers a few percent of cosine similarity on
+/// tilted faces. Samples that fall outside the source bounds resolve to black.
 fn warp_affine(
     src: &ImageBuffer<Rgb<u8>, Vec<u8>>,
     a: f32,
@@ -145,14 +150,52 @@ fn warp_affine(
         let yp = yp as f32;
         let sx = ia * (xp - tx) + ib * (yp - ty);
         let sy = -ib * (xp - tx) + ia * (yp - ty);
-        let xi = sx.round() as i32;
-        let yi = sy.round() as i32;
-        if xi >= 0 && xi < sw && yi >= 0 && yi < sh {
-            *src.get_pixel(xi as u32, yi as u32)
-        } else {
-            image::Rgb([0u8, 0, 0])
-        }
+        bilinear_sample(src, sw, sh, sx, sy)
     })
+}
+
+/// Bilinear sampler with a black border. Out-of-bounds neighbours contribute
+/// zero, so a sample whose four-tap kernel straddles the edge degrades
+/// smoothly instead of either snapping or replicating the boundary pixel.
+fn bilinear_sample(
+    src: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+    sw: i32,
+    sh: i32,
+    sx: f32,
+    sy: f32,
+) -> Rgb<u8> {
+    let x0 = sx.floor() as i32;
+    let y0 = sy.floor() as i32;
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
+    let fx = sx - x0 as f32;
+    let fy = sy - y0 as f32;
+
+    let fetch = |x: i32, y: i32| -> [f32; 3] {
+        if x >= 0 && x < sw && y >= 0 && y < sh {
+            let p = src.get_pixel(x as u32, y as u32).0;
+            [p[0] as f32, p[1] as f32, p[2] as f32]
+        } else {
+            [0.0, 0.0, 0.0]
+        }
+    };
+
+    let p00 = fetch(x0, y0);
+    let p10 = fetch(x1, y0);
+    let p01 = fetch(x0, y1);
+    let p11 = fetch(x1, y1);
+
+    let w00 = (1.0 - fx) * (1.0 - fy);
+    let w10 = fx * (1.0 - fy);
+    let w01 = (1.0 - fx) * fy;
+    let w11 = fx * fy;
+
+    let mut out = [0u8; 3];
+    for c in 0..3 {
+        let v = p00[c] * w00 + p10[c] * w10 + p01[c] * w01 + p11[c] * w11;
+        out[c] = v.clamp(0.0, 255.0).round() as u8;
+    }
+    Rgb(out)
 }
 
 // ── Preprocessing for ArcFace ─────────────────────────────────────────────────
@@ -246,5 +289,21 @@ mod tests {
         assert_eq!(out.get_pixel(2, 0)[0], img.get_pixel(0, 0)[0]);
         assert_eq!(out.get_pixel(1, 0)[0], img.get_pixel(0, 1)[0]);
         assert_eq!(out.get_pixel(2, 1)[0], img.get_pixel(1, 0)[0]);
+    }
+
+    #[test]
+    fn warp_affine_bilinear_interpolates_subpixel() {
+        // Horizontal gradient: R = x * 10. With a nearest-neighbour
+        // sampler a 0.5-pixel shift would snap to x=1 and lose the
+        // midpoint value entirely; bilinear must produce R = 5 (midpoint
+        // of R=0 at x=0 and R=10 at x=1) and R = 15 at x=1.5.
+        let img = ImageBuffer::from_fn(3, 3, |x, _| image::Rgb([(x * 10) as u8, 0, 0]));
+
+        // Identity transform shifted by half a pixel in x:
+        //   a = 1, b = 0, tx = -0.5, ty = 0 ⇒ sx = xp + 0.5, sy = yp
+        let out = warp_affine(&img, 1.0, 0.0, -0.5, 0.0, 3, 3);
+
+        assert_eq!(out.get_pixel(0, 0)[0], 5);
+        assert_eq!(out.get_pixel(1, 0)[0], 15);
     }
 }
