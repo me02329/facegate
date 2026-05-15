@@ -19,6 +19,10 @@
 /.tmp/
 facegate-*.tmp
 
+# Local-only working notes (publishing checklist, etc.) — see
+# PUBLISHING.local.md for what lives here.
+*.local.md
+
 # mdBook output (built by .github/workflows/pages.yml in CI)
 /docs/book/book/
 
