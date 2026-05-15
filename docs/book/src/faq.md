@@ -1,8 +1,49 @@
 # FAQ
 
+## Why do I need to re-enrol when I move to a different room?
+
+Short answer: today's pipeline treats every meaningful change in ambient
+lighting as if it were a different face. Enrolling in one environment
+produces templates that drift away in the embedding space when the
+runtime environment differs — so the match score falls under the
+threshold, and you bounce off authentication until you re-enrol.
+
+This is the same root cause as the next FAQ entry ("why does it fail in
+the dark"), generalised: not just darkness, but *any* lighting change
+big enough to shift the captured frame meaningfully. A warmer lamp at
+night, sunlight pouring through one window in the afternoon, or a
+brighter monitor as your only light source — each one moves your live
+capture into a region of the embedding space the templates do not
+cover.
+
+Why this happens, what we are doing about it, and how Windows Hello
+sidesteps it entirely is documented in detail on the [recognition
+pipeline and lighting dependence][rp] architecture page. Short version
+of the planned work:
+
+- [#51][issue-51] adds illumination normalisation (CLAHE) before the
+  embedder runs, plus enrolment UX that actively prompts you to vary
+  conditions between samples. This is the cheap, no-model-change fix.
+- [#52][issue-52] swaps the embedder for a permissively-licensed
+  alternative (AuraFace, Apache-2.0). Required quality baseline for the
+  next step.
+- [#16][issue-16] then evaluates empirically whether routing the IR
+  camera through the new pipeline gets close to Windows Hello's
+  environmental independence.
+
+**Workarounds today:**
+
+- Enrol a few extra templates under your common conditions:
+  `facegate add --label "morning"`, `--label "evening"`,
+  `--label "lamp-only"`. The broker matches against every template
+  you have for a user, so any one of them can succeed.
+- Lower the `threshold` in `[recognition.session]` if you accept the
+  trade-off (sudo defaults stay strict).
+
 ## Why does Facegate fail to recognise me in the dark?
 
-This is an expected limitation of the current pipeline, not a bug.
+This is the extreme case of the lighting-dependence problem above, and
+an expected limitation of the current pipeline rather than a bug.
 
 Facegate's face embedding model is **ArcFace
 (`arcface_w600k_r50.onnx`)**, which is trained on RGB faces in
@@ -21,7 +62,9 @@ RGB+IR cross-check (verifying that a face is present and spatially
 aligned with the RGB capture). ArcFace is trained on RGB pixels and
 produces meaningless similarity scores against IR crops — so the broker
 **does not** match against the IR embedding. Doing so would reject
-every genuine user.
+every genuine user. The [recognition pipeline page][rp] explains why in
+detail, including how Windows Hello solves it with an IR-trained model
+and an active IR illuminator.
 
 **What you can do today:**
 
@@ -30,21 +73,24 @@ every genuine user.
 - Increase `warmup_frames` in `[camera]` so auto-exposure has time to
   ramp up before capture.
 - Enrol additional templates under different lighting conditions
-  (`facegate add --label "low-light" ...`). The broker matches against
-  every template for a user, so any one of them can succeed.
+  (`facegate add --label "low-light" ...`).
 - Lower the `threshold` in `[recognition.session]` if you accept the
   trade-off (sudo defaults stay strict).
 
 **What is planned:**
 
-- [#10][issue-10] (v0.4.0) — multi-camera fallback (try a second device
-  if the first one fails). Does not solve low-light by itself.
-- [#16][issue-16] (v0.5.0) — interchangeable face model backends. This
-  is the architectural prerequisite for an IR-native or multi-modal
-  recognition model.
-- A future issue will track IR-native recognition specifically once
-  [#16][issue-16] lands and a usable open-source IR ArcFace equivalent
-  is identified.
+- [#51][issue-51] (v0.5.0) — illumination preprocessing + guided
+  multi-sample enrolment. The cheap robustness wins.
+- [#52][issue-52] (v0.4.0) — replace the InsightFace-bundled models
+  with permissively-licensed alternatives (AuraFace, YuNet). Unrelated
+  to low light directly, but required as the baseline for everything
+  downstream.
+- [#16][issue-16] (v0.5.0) — empirical evaluation of the IR camera
+  path through the new pipeline + interchangeable backends. If the IR
+  path does not work through an RGB-trained embedder, a long-term
+  follow-up will track training a custom IR model.
+- [#10][issue-10] (v0.4.0) — multi-camera fallback (try a second
+  device if the first one fails). Does not solve low light by itself.
 
 ## Is this Windows Hello for Linux?
 
@@ -56,6 +102,7 @@ attack than a user-space binary — but the implementations diverge:
 |---|---|---|
 | Hardware requirement | Certified IR cameras + depth sensor | Any V4L2 camera (RGB and/or IR) |
 | Face model | Microsoft-proprietary, IR-trained | Open-source ArcFace (RGB-trained) |
+| Identity sensor | IR + active IR illuminator → lighting-invariant | RGB → sensitive to ambient light (see [pipeline page][rp]) |
 | Liveness | Hardware depth + IR | Optional RGB+IR spatial cross-check |
 | Template storage | TPM-sealed | File system, broker-owned (TPM sealing tracked in [#26][issue-26]) |
 | Trust boundary | Kernel-mode driver | User-mode broker daemon with systemd hardening |
@@ -65,6 +112,10 @@ The honest summary: **Facegate aims for a Windows-Hello-style UX with
 the threat model adapted to what you can build on commodity Linux
 hardware**. It is not a drop-in replacement and the security posture
 differs in ways called out in the [threat model](./security/threat-model.md).
+The [recognition pipeline page][rp] walks through the most user-visible
+gap — Windows Hello's lighting-invariant behaviour comes from its active
+IR illuminator paired with an IR-trained model, neither of which has an
+off-the-shelf open-source equivalent today.
 
 ## I locked myself out — how do I recover?
 
@@ -108,26 +159,50 @@ Both are tracked but not yet implemented:
 
 ## Are the SCRFD / ArcFace models the best available?
 
-They're a reasonable open-source baseline, not the strict state of the
-art. Notable alternatives:
+They're a reasonable open-source baseline, but the bigger story today
+is a **licensing** one. The current `arcface_w600k_r50.onnx` is part of
+the InsightFace `buffalo_l` bundle, whose pre-trained models are
+[released for non-commercial research use only][insightface-licensing]
+even though the surrounding code is MIT. Same goes for the SCRFD
+detector that ships in the same bundle. That is not a comfortable
+place for a publicly-distributed GPL project to sit, and it limits any
+downstream that wants commercial-use-clean dependencies.
+
+[#52][issue-52] (v0.4.0) addresses this directly by switching to:
+
+- **AuraFace-v1** (Apache-2.0) for the embedder — explicitly built as
+  a commercial-clean ArcFace alternative with the same 112×112 RGB
+  input and 512-d output, so it slots into the existing pipeline.
+- **OpenCV YuNet** (MIT) for face detection.
+
+If you want to know which other research-grade models exist and why
+none of them are silver bullets:
 
 - **AdaFace** (2022) — adaptive-margin variant of ArcFace, ~1% better
-  on hard benchmarks (low quality, profile angles).
+  on hard benchmarks (low quality, profile angles). Licence inherits
+  from InsightFace.
 - **MagFace** — produces a magnitude correlated with face quality;
   useful for rejecting blurry frames before they reach the matcher.
 - **ArcFace `w600k_r100`** — ResNet-100 backbone, ~1-2% better than
-  `r50` but ~2x heavier.
+  `r50` but ~2x heavier. Same licence story.
 
 For face detection, SCRFD-500M is a strong efficiency/accuracy tradeoff
 and is unlikely to be a real bottleneck. [#16][issue-16] is the
 architectural prerequisite for swapping backends so model variants can
 be A/B tested without forking the broker.
 
-In practice the bottleneck is **frame quality** (lighting, exposure,
-blur, distance), not the model. Tuning the camera and enrolling under
-varied conditions buys more than a model swap on typical hardware.
+In practice the dominant factor on a working pipeline is **frame
+quality** (lighting, exposure, blur, distance), not the model — which
+is why [#51][issue-51] (illumination normalisation + guided enrolment)
+is expected to beat any equivalent model swap on the typical user
+problem. See the [recognition pipeline page][rp] for the full
+breakdown.
 
 [issue-10]: https://github.com/me02329/facegate/issues/10
 [issue-16]: https://github.com/me02329/facegate/issues/16
 [issue-25]: https://github.com/me02329/facegate/issues/25
 [issue-26]: https://github.com/me02329/facegate/issues/26
+[issue-51]: https://github.com/me02329/facegate/issues/51
+[issue-52]: https://github.com/me02329/facegate/issues/52
+[insightface-licensing]: https://www.insightface.ai/services/models-commercial-licensing
+[rp]: ./architecture/recognition-pipeline.md

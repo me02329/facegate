@@ -41,22 +41,168 @@ kernel / initramfs updates is the hard part — PCR policies are
 brittle and an unrecoverable lockout on a routine update is worse
 than the protection is worth.
 
+## Recognition robustness in varied lighting
+
+**Status:** in progress. Tracked as [#51][issue-51] (v0.5.0).
+
+**Problem:** The current pipeline feeds the aligned face crop to
+ArcFace with no illumination normalisation, and the enrolment UX
+prompts for multiple samples without guiding the user to vary
+conditions between captures. The result is that templates cluster
+around the lighting of one environment, and a user moving to a
+different room (or to a different time of day) bounces off
+authentication until they re-enrol. See the [recognition pipeline
+page][rp] for the chain of cause and effect.
+
+**Plan:** add CLAHE-style illumination normalisation in
+`facegate_core::embedding` before ArcFace inference, and rewrite the
+per-sample prompts in `facegate add` (and the TUI enrolment screen) to
+actively instruct the user to change lighting, distance, and head pose
+between samples. Default sample count moves from 3 to 5. The same
+preprocessing runs at enrolment and at match time so they cannot
+drift.
+
+This is the cheap robustness win — no model change required — and it
+is a prerequisite for any honest benchmark of later work.
+
+## Model licensing — InsightFace bundle replacement
+
+**Status:** not started. Tracked as [#52][issue-52] (v0.4.0).
+
+**Problem:** The packaging postinstall script and `install-dev.sh`
+both download the **`buffalo_l.zip` bundle** from
+`github.com/deepinsight/insightface/releases/` and extract the
+detector (SCRFD) and embedder (ArcFace `w600k_r50`) we ship as
+defaults. The InsightFace project documents that its pre-trained
+models are released for **non-commercial research use only**, even
+though the surrounding code is MIT. Facegate code is GPL-3.0-or-later
+and binary packages are distributed publicly (GitHub Releases, AUR via
+`facegate-bin`, COPR). We do not redistribute the `.onnx` files inside
+the packages, but our install scripts and shipped configuration
+actively prescribe and fetch them on every install — which is not a
+defensible position for a public OSS project.
+
+**Plan:** switch the defaults to permissively-licensed alternatives:
+
+- **AuraFace-v1** (Apache-2.0) for the embedder. Explicitly built as a
+  commercial-clean ArcFace alternative; same 112×112 RGB input,
+  512-d output, so it drops into the existing pipeline.
+- **OpenCV YuNet** (MIT) for face detection.
+
+The swap is mandatory before any benchmarking against future work, so
+any numbers captured are against the embedder we will actually ship.
+Existing users will need to re-enrol because embeddings from different
+models are not comparable; this is documented in the issue.
+
 ## IR-native and multi-modal recognition
 
-**Status:** not started. Architectural prerequisite is
-[#16][issue-16] (v0.5.0) — interchangeable face model backends.
+**Status:** open research direction. Tracked as [#16][issue-16]
+(v0.5.0), blocked by [#51][issue-51] and [#52][issue-52].
 
 **Problem:** ArcFace is RGB-trained. In low light, the RGB stream is
-useless and the IR stream is unusable for matching because the same
-ArcFace weights produce meaningless similarities on IR crops. See the
-[FAQ entry][faq-lowlight] for the full reasoning.
+noisy and the IR stream is unusable for matching because the same
+ArcFace weights produce meaningless similarities on IR crops — a fact
+that was empirically confirmed in commit `1582696` when the previous
+IR cross-check was changed from identity matching to liveness-only.
+See the [recognition pipeline page][rp] for why and how Windows Hello
+sidesteps this with an IR-trained model paired with an active IR
+illuminator.
 
-**Plan:** [#16][issue-16] adds the trait + dynamic loading so the
-broker can run a different embedding backend per camera kind. Once
-that lands, a follow-up issue will track integrating an IR-trained
-ArcFace equivalent (or a multi-modal model that takes RGB+IR jointly).
-Open-source IR face models with usable licences are scarce; the
-project does not have a candidate yet.
+**Audit finding (May 2026):** the project does not have a candidate
+IR-native open-source model. The audit looked at HuggingFace,
+InsightFace community forks, the OpenCV Zoo, and academic releases
+(PR-HFR, LightCNN variants); nothing combines (a) NIR-trained weights,
+(b) a permissive licence Facegate can ship, and (c) production-grade
+accuracy. The canonical academic NIR dataset (CASIA NIR-VIS 2.0) is
+research-only with explicit no-redistribution and no-commercial-use
+terms. Every peer Linux project we looked at (Howdy, Visage,
+LinuxCamPAM, Biopass) ultimately runs an RGB-trained embedder against
+IR frames — nobody on the Linux side has shipped IR-native identity
+matching with open models.
+
+**Plan:** [#16][issue-16] has therefore been reframed from *"prepare a
+model swap"* into *"empirically determine how far the IR pipeline can
+be pushed through the (post-#52) RGB embedder, with the (post-#51)
+illumination normalisation applied to IR crops, behind a clean backend
+abstraction"*. Concretely the issue will:
+
+- Build a controlled benchmark on the test hardware (RGB-only,
+  IR-only, and current RGB+IR cross-check configurations) and
+  document the operating points (FAR / FRR by lighting condition).
+- Land a trait-based backend abstraction
+  (`trait FaceEmbedder` / `trait FaceDetector`) so future model swaps
+  do not touch call sites across the codebase.
+- If IR-through-RGB-embedder reaches usable territory, ship a new
+  `ir-primary` profile with sane per-scope recognition defaults.
+- If it does not, document the failure modes and trigger the
+  long-term fallback below.
+
+### Long-term fallback: custom IR model via synthetic data
+
+If [#16][issue-16]'s empirical work shows that the existing RGB
+embedder cannot deliver acceptable identity matching on IR frames,
+the realistic next step is **not** to find a different pretrained
+NIR model — the May 2026 audit confirmed none exists under a licence
+we can ship. The realistic step is to **train one ourselves on
+synthetic NIR data**, generated from RGB faces we already have
+permission to use.
+
+**Why synthetic and not real NIR data:** every NIR face dataset
+worth training on (CASIA NIR-VIS 2.0, Oulu-CASIA NIR-VIS,
+PolyU-NIRFD, BUAA-VisNir, HFB) is academic and released under
+research-only terms with explicit no-redistribution and
+no-commercial-use clauses. We cannot ship a model whose weights are
+derived from any of them in a public GPL package. Collecting our own
+NIR dataset is technically possible but requires hundreds-to-thousands
+of consenting subjects under GDPR Article 9 (special-category
+biometric data), controlled lighting setups, and months of work —
+not a realistic path for this project.
+
+**The synthetic NIR pipeline (clean licence chain end-to-end):**
+
+```text
+   commercially-clean        public method            own training
+   RGB face dataset    +     (PBFR / similar)    →    on synthetic NIR
+   (e.g. AuraFace's          for RGB → NIR             via AuraFace
+   training data)            transformation            fine-tuning
+        │                          │                        │
+        ▼                          ▼                        ▼
+     Apache-2.0                code public,             our weights,
+     compatible              method published          our licence
+                              (NeurIPS 2022)            (Apache-2.0)
+```
+
+**Method candidates:**
+
+- **PBFR** (Physically-Based Face Rendering for NIR-VIS Face
+  Recognition, NeurIPS 2022, `github.com/yoqim/PR-HFR`) — reconstructs
+  3D face shape + reflectance from a 2D RGB face, transforms the VIS
+  reflectance into NIR reflectance via a physical model, then renders
+  photorealistic synthetic NIR. **Code is public**; only the
+  pre-trained weights live in the InsightFace repo and inherit its
+  non-commercial restriction. We re-train using the published
+  methodology on data we control → resulting weights are clean.
+- **CycleGAN-style NIR↔VIS translation** — simpler implementation,
+  more variable output quality, used as a fallback if PBFR turns out
+  to be too heavy to reproduce.
+
+**Honest caveat:** synthetic NIR is not real NIR. The model may
+under-perform on actual IR sensor output (precise wavelength
+differences, sensor noise, illuminator calibration). We will only
+know after benchmarking on the test hardware. If synthetic-only
+training falls short, the next step would be to negotiate
+research-use access to CASIA NIR-VIS 2.0 specifically for *evaluation*
+(not training) — that is a much narrower ask than a redistributable
+training licence.
+
+**Estimated cost:** several GPU-days of compute (a single A100 cloud
+instance or a local consumer GPU is sufficient), a few weeks of ML
+engineering time for the pipeline + fine-tuning + evaluation. The
+critical-path risk is dataset prep and evaluation, not raw compute.
+
+This is captured in #16's acceptance criteria as the path forward if
+the empirical IR evaluation fails — a separate issue with its own
+milestone would be opened at that point.
 
 ## Multi-camera fallback
 
@@ -92,4 +238,7 @@ settings. Existing two-scope configs continue to work as defaults.
 [issue-16]: https://github.com/me02329/facegate/issues/16
 [issue-25]: https://github.com/me02329/facegate/issues/25
 [issue-26]: https://github.com/me02329/facegate/issues/26
+[issue-51]: https://github.com/me02329/facegate/issues/51
+[issue-52]: https://github.com/me02329/facegate/issues/52
 [faq-lowlight]: ../faq.md#why-does-facegate-fail-to-recognise-me-in-the-dark
+[rp]: ../architecture/recognition-pipeline.md

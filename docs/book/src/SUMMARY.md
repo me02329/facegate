@@ -14,6 +14,7 @@
 - [Overview](./architecture/overview.md)
 - [The broker daemon](./architecture/broker.md)
 - [IPC protocol](./architecture/ipc.md)
+- [Recognition pipeline and lighting dependence](./architecture/recognition-pipeline.md)
 - [Screen unlock flow](./architecture/screen-unlock.md)
 
 # Security
