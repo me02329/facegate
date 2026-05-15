@@ -590,7 +590,28 @@ impl BrokerState {
         ir_probe: &FrameProbe,
     ) -> ResponseEnvelope {
         if !self.cross_check.required {
-            return self.match_frame(peer, username, auth_scope, rgb_probe);
+            // A paired request landing on a broker that does not require
+            // cross-check is a client/broker config mismatch — the client
+            // captured an IR frame the broker has no policy to consume.
+            // Silently falling back to single-RGB match (the previous
+            // behaviour) hid the misconfiguration from the operator and
+            // wasted the IR capture work; refuse loudly instead.
+            tracing::warn!(
+                uid = peer.map(|p| p.uid).unwrap_or(u32::MAX),
+                "MatchFramePair received but broker has no cross-check policy; \
+                 client/broker config mismatch — refusing"
+            );
+            self.write_audit(
+                username,
+                auth_scope,
+                AuditOutcome::Failure,
+                AuditReason::Internal,
+            );
+            return ResponseEnvelope::error(
+                ErrorCode::BadRequest,
+                "MatchFramePair requires [camera.cross_check].enabled = true \
+                 on the broker; submit MatchFrame instead",
+            );
         }
         if !authorized_for_match(peer, username, auth_scope) {
             self.write_audit(
@@ -1917,6 +1938,29 @@ mod tests {
         assert!(!result.matched);
         assert_eq!(result.score, None);
         assert_eq!(result.reason, MatchReason::CrossCheckRequired);
+    }
+
+    #[test]
+    fn match_frame_pair_without_cross_check_returns_bad_request() {
+        // A client submitting MatchFramePair to a broker that has no
+        // cross-check policy is a config mismatch — the broker must refuse
+        // explicitly (BadRequest) rather than silently downgrade to a
+        // single-RGB match.
+        let (_dir, state) = test_state();
+        assert!(!state.cross_check.required); // default in test_state
+        let response = state.dispatch(
+            RequestEnvelope::new(Request::MatchFramePair {
+                username: "alice".to_owned(),
+                auth_scope: IpcAuthScope::Session,
+                rgb_frame: one_pixel_rgb(100),
+                ir_frame: one_pixel_rgb(110),
+            }),
+            Some(PeerCredentials { uid: 0 }),
+        );
+        let Response::Error(error) = response.response else {
+            panic!("expected error response, got {:?}", response.response);
+        };
+        assert_eq!(error.code, ErrorCode::BadRequest);
     }
 
     #[test]

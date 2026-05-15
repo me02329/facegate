@@ -56,7 +56,12 @@ requests return `unauthorized` and never expose stored template vectors.
 - `match_frame`: submits one RGB frame for broker-side detection, embedding,
   and matching.
 - `match_frame_pair`: submits synchronized RGB and IR frames for RGB+IR
-  cross-check.
+  cross-check. **Only valid when the broker has
+  `[camera.cross_check].enabled = true`.** A `match_frame_pair` sent to a
+  broker without a cross-check policy is refused with `bad_request` — the
+  broker does not silently fall back to single-frame matching, because that
+  would hide a client/broker config mismatch. Clients that do not know
+  whether the broker requires cross-check should send `match_frame`.
 - `enroll`: root-only template enrollment.
 - `list`: lists template metadata for one user.
 - `remove`: root-only template deletion.
