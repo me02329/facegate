@@ -57,6 +57,8 @@ the dependencies or build/install steps change — not on every commit.
 `extra/onnxruntime` package satisfies the broker's `load-dynamic` ort
 backend — no manual download needed, unlike the .deb / .rpm flows.
 
-Models (`scrfd_500m.onnx` + `arcface_w600k_r50.onnx`) are still fetched
-on first run via `facegate doctor` / `facegate models install` because
-their license forbids redistribution from third parties.
+Models (YuNet `face_detection_yunet_2023mar.onnx` + AuraFace
+`glintr100.onnx`) are still fetched on first run via `facegate doctor`
+to keep the binary package size reasonable (~261 MB of weights).
+Both are permissively licensed (MIT / Apache 2.0) since v0.4.0, so the
+restriction is bandwidth rather than redistribution.

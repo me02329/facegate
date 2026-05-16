@@ -43,8 +43,8 @@ cooldown_after_failures = 3
 cooldown_seconds = 30
 
 [models]
-detector = "/usr/share/facegate/models/scrfd_500m.onnx"
-embedder = "/usr/share/facegate/models/arcface_w600k_r50.onnx"
+detector = "/usr/share/facegate/models/face_detection_yunet_2023mar.onnx"
+embedder = "/usr/share/facegate/models/glintr100.onnx"
 
 [storage]
 base_dir = "/var/lib/facegate/users"
