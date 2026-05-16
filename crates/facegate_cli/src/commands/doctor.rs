@@ -203,18 +203,69 @@ pub fn run_streaming(
             CameraKind::Unknown => {}
         }
     }
+    let detector_present = config.models.detector.exists();
+    let detector_hint: Option<&str> =
+        if !detector_present && legacy_v03_model_path(&config.models.detector) {
+            Some(
+                "config still points at the v0.3.x detector. Edit [models].detector \
+             in /etc/facegate/config.toml to:\n          \
+             /usr/share/facegate/models/face_detection_yunet_2023mar.onnx\n        \
+             (the v0.4.0 default is YuNet under MIT; run 'sudo facegate doctor' \
+             after editing.)",
+            )
+        } else {
+            Some(reinstall_hint(distro))
+        };
     all_ok &= chk(
         tx,
         &format!("detector model  ({})", config.models.detector.display()),
-        config.models.detector.exists(),
-        Some(reinstall_hint(distro)),
+        detector_present,
+        detector_hint,
     );
+
+    let embedder_present = config.models.embedder.exists();
+    let embedder_hint: Option<&str> =
+        if !embedder_present && legacy_v03_model_path(&config.models.embedder) {
+            Some(
+                "config still points at the v0.3.x embedder. Edit [models].embedder \
+             in /etc/facegate/config.toml to:\n          \
+             /usr/share/facegate/models/glintr100.onnx\n        \
+             (the v0.4.0 default is AuraFace under Apache 2.0; all existing \
+             templates will need re-enrolment.)",
+            )
+        } else {
+            Some(reinstall_hint(distro))
+        };
     all_ok &= chk(
         tx,
         &format!("embedder model  ({})", config.models.embedder.display()),
-        config.models.embedder.exists(),
-        Some(reinstall_hint(distro)),
+        embedder_present,
+        embedder_hint,
     );
+
+    // Surface the v0.3.x → v0.4.0 template migration. The new embedder
+    // (AuraFace / glintr100) produces 512-d vectors in a different latent
+    // space than the old InsightFace ArcFace; templates enrolled before
+    // the swap will never match no matter how good the face capture is.
+    if let Some(stale) = legacy_user_dirs(&config.storage.base_dir, &config.models.embedder) {
+        if !stale.is_empty() {
+            out!(
+                "WARNING: {} user(s) have templates enrolled before the v0.4.0 \
+                 embedder swap:",
+                stale.len()
+            );
+            for user in &stale {
+                out!("           - {user}");
+            }
+            out!(
+                "         Re-enrol with 'sudo facegate add --user <name>' for each \
+                 listed user;\n         the old templates will never match against the \
+                 new embedder's embedding space."
+            );
+            // Not an `all_ok` fail — the broker still loads and the user can
+            // still password-fallback. It's a migration nudge, not a hard error.
+        }
+    }
 
     let ort_ok = [
         "/usr/lib/libonnxruntime.so",
@@ -288,6 +339,55 @@ pub fn run_streaming(
         out!("Some checks failed — see hints above.");
     }
     Ok(())
+}
+
+/// Returns true if `path` ends in one of the model filenames that
+/// v0.3.x shipped — used to give a targeted migration hint when the
+/// user's config still points at the InsightFace bundle filenames after
+/// upgrading to v0.4.0.
+fn legacy_v03_model_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    matches!(
+        name,
+        "scrfd_500m.onnx"
+            | "arcface_w600k_r50.onnx"
+            | "det_500m.onnx"
+            | "w600k_r50.onnx"
+            | "det_10g.onnx"
+            | "w600k_mbf.onnx"
+    )
+}
+
+/// Returns the list of usernames whose `embeddings.json` predates the
+/// configured embedder model file. The heuristic catches the common
+/// v0.3.x → v0.4.0 upgrade pattern: enrol on the old InsightFace
+/// embedder, then upgrade and have postinstall drop a newer embedder
+/// file into `/usr/share/facegate/models/`. Returns `None` if either
+/// directory is unreadable — silence is the right behaviour for a
+/// best-effort migration nudge.
+fn legacy_user_dirs(base_dir: &Path, embedder_path: &Path) -> Option<Vec<String>> {
+    let embedder_mtime = std::fs::metadata(embedder_path).ok()?.modified().ok()?;
+    let entries = std::fs::read_dir(base_dir).ok()?;
+    let mut stale = Vec::new();
+    for entry in entries.flatten() {
+        let user_dir = entry.path();
+        let embeddings = user_dir.join("embeddings.json");
+        let Ok(meta) = std::fs::metadata(&embeddings) else {
+            continue;
+        };
+        let Ok(file_mtime) = meta.modified() else {
+            continue;
+        };
+        if file_mtime < embedder_mtime {
+            if let Some(name) = user_dir.file_name().and_then(|n| n.to_str()) {
+                stale.push(name.to_owned());
+            }
+        }
+    }
+    stale.sort();
+    Some(stale)
 }
 
 fn safe_template_storage(path: &Path) -> bool {
