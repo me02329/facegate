@@ -4,7 +4,7 @@ Facegate is a workspace of five Rust crates plus a PAM module:
 
 | Crate | Role |
 |---|---|
-| `facegate_brokerd` | Privileged system daemon. Owns templates, runs SCRFD + ArcFace, validates IPC peers via `SO_PEERCRED`, writes the audit log. |
+| `facegate_brokerd` | Privileged system daemon. Owns templates, runs YuNet + AuraFace, validates IPC peers via `SO_PEERCRED`, writes the audit log. |
 | `facegate_cli` | The `facegate` binary — CLI subcommands and the Ratatui TUI. Also implements the `watch` and `auth` helper subcommands. |
 | `facegate_core` | V4L2 capture, ONNX Runtime loading helpers, config schema, shared types. Linked into the broker for full inference; linked into the CLI only for capture. |
 | `facegate_ipc` | Versioned JSON-over-Unix-socket protocol (currently v5) shared between clients and the broker. Defines `Request`, `Response`, audit events, `MatchFrame`, `MatchFramePair`. |
@@ -16,7 +16,7 @@ Facegate is a workspace of five Rust crates plus a PAM module:
 ┌───────────────────────────┐         ┌─────────────────────────────┐
 │   sudo / login / lock     │         │   facegate-brokerd.service  │
 │  ┌─────────────────────┐  │         │  ┌───────────────────────┐  │
-│  │  pam_facegate.so    │  │         │  │  SCRFD + ArcFace      │  │
+│  │  pam_facegate.so    │  │         │  │  YuNet + AuraFace     │  │
 │  │  (small, no ML)     │  │         │  │  (ONNX Runtime)       │  │
 │  └─────────┬───────────┘  │         │  └───────────┬───────────┘  │
 │            │ spawns       │  IPC    │              │              │

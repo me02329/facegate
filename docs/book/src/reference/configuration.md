@@ -61,7 +61,7 @@ base_dir = "/var/lib/facegate/users"
 | `fps` | 30 | Stream FPS. Higher values shorten `warmup_frames` time. |
 | `timeout_ms` | 5000 | Max time spent waiting for a usable frame. |
 | `warmup_frames` | 5 | Frames discarded after `STREAMON` to let auto-exposure stabilise. |
-| `min_face_size` | 80 | Minimum SCRFD face box dimension. Smaller boxes are ignored. |
+| `min_face_size` | 80 | Minimum detected face box dimension (px). Smaller boxes are ignored before the embedder runs. |
 
 ### `[camera.ir]`
 

@@ -18,10 +18,10 @@ RGB.
 
 ## Choosing the right primary camera
 
-Facegate's recognition pipeline (ArcFace) is RGB-trained. **Always
-pick an RGB device as the primary `[camera].device`**. If your laptop
-has both an RGB webcam and an IR camera, the IR one belongs in
-`[camera.ir]`, not in `[camera]`.
+Facegate's recognition pipeline (AuraFace, ArcFace-family) is
+RGB-trained. **Always pick an RGB device as the primary
+`[camera].device`**. If your laptop has both an RGB webcam and an IR
+camera, the IR one belongs in `[camera.ir]`, not in `[camera]`.
 
 ```sh
 sudo facegate setup       # auto-picks RGB as primary; offers cross-check inline
@@ -37,7 +37,7 @@ the IR feed into a liveness signal:
 1. Both cameras capture a frame at roughly the same time.
 2. The broker rejects probes whose RGB/IR capture timestamps disagree
    by more than `max_time_skew_ms` (default 200 ms).
-3. SCRFD must detect exactly one face in **each** stream.
+3. YuNet must detect exactly one face in **each** stream.
 4. Landmarks from the IR detection are mapped to RGB pixel space via
    a homography you calibrate once with `facegate calibrate-cameras`.
 5. If the mapped IR landmarks are more than `max_position_offset_px`

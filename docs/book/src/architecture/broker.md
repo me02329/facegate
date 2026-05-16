@@ -64,9 +64,9 @@ For every request:
 5. Dispatch to the handler. For `MatchFrame` / `MatchFramePair`:
    - Validate declared geometry against bounds (max 4096², buffer
      length must equal `width × height × bpp`).
-   - Run SCRFD on the frame.
+   - Run YuNet on the frame.
    - Reject if zero or multiple faces are detected.
-   - Run ArcFace on the canonical crop.
+   - Run AuraFace on the canonical crop.
    - Compare against every template for `(username, auth_scope)`.
    - Apply rate limiting, lockout, cooldown.
    - Zeroise the probe embedding and any loaded templates.

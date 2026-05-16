@@ -20,13 +20,13 @@ of "active light source + sensor + model all in the same spectrum".
         │                       facegate-brokerd                         │
         │                                                                │
   ┌─────┴────┐   raw frame    ┌────────┐   crop+landmarks   ┌─────────┐  │
-  │  V4L2    │ ─────────────► │ SCRFD  │ ─────────────────► │ Align   │  │
+  │  V4L2    │ ─────────────► │ YuNet  │ ─────────────────► │ Align   │  │
   │  RGB     │   (640×360,    │ detect │   (5-point lm)     │ 112×112 │  │
   │  camera  │    YUYV→RGB)   └────────┘                    └────┬────┘  │
   └──────────┘                                                   │       │
         ▲                                                        ▼       │
         │ ambient light                                  ┌───────────┐   │
-        │ shapes the                                     │  ArcFace  │   │
+        │ shapes the                                     │ AuraFace  │   │
         │ pixel values                                   │ embedder  │   │
         │ at every stage                                 │ (RGB!)    │   │
         │                                                └─────┬─────┘   │
@@ -44,9 +44,9 @@ of "active light source + sensor + model all in the same spectrum".
         └────────────────────────────────────────────────────────────────┘
 ```
 
-Source map: V4L2 capture lives in `facegate_core::camera`, SCRFD in
+Source map: V4L2 capture lives in `facegate_core::camera`, YuNet in
 `facegate_core::detection`, alignment + embedding in
-`facegate_core::embedding` (`align_face` → ArcFace ONNX session), match
+`facegate_core::embedding` (`align_face` → AuraFace ONNX session), match
 decision in `facegate_brokerd::main` (`handle_match_frame`).
 
 ### Where lighting hits the pipeline
@@ -57,9 +57,9 @@ pixel values at every stage of the chain above:
 | Stage | What ambient light changes |
 |---|---|
 | Sensor exposure / gain | Auto-exposure picks a different exposure time and gain. The same scene at two light levels produces frames with different noise floors, different white balance, and different effective dynamic range. |
-| SCRFD detection | At low contrast SCRFD's bbox + 5-point landmarks become less stable. A landmark drift of a few pixels propagates into a worse alignment, then a worse embedding. |
-| Alignment | Same as above — the similarity transform is fit to whatever SCRFD returned. Garbage in, garbage out. |
-| ArcFace embedding | The 512-d vector ArcFace emits is *not* invariant to lighting. The same identity under two markedly different lightings produces two vectors with cosine similarity meaningfully lower than the same identity under the same lighting. |
+| YuNet detection | At low contrast YuNet's bbox + 5-point landmarks become less stable. A landmark drift of a few pixels propagates into a worse alignment, then a worse embedding. |
+| Alignment | Same as above — the similarity transform is fit to whatever YuNet returned. Garbage in, garbage out. |
+| AuraFace embedding | The 512-d vector the embedder emits is *not* invariant to lighting. The same identity under two markedly different lightings produces two vectors with cosine similarity meaningfully lower than the same identity under the same lighting. |
 
 So a template enrolled in well-lit conditions sits at one point in the
 512-d embedding space; the same user captured in a dim room sits
@@ -156,26 +156,27 @@ behind that statement.
 The work to close the lighting-dependence gap is split into three
 explicit pieces, each with its own GitHub issue:
 
-| # | Title | What it does | Why it is needed |
+| # | Title | Status | What it does |
 |---|---|---|---|
-| [#51][issue-51] | Recognition robustness: guided sample variation + illumination preprocessing | Adds CLAHE-style normalisation to the aligned face crop before ArcFace, and changes the enrolment UX to actively prompt the user to vary lighting/pose/distance between samples. Bumps the default sample count from 3 to 5. | The cheap robustness wins. Does not require changing the model. Lands first so users get a usable experience and so any later work has an honest baseline. |
-| [#52][issue-52] | Replace InsightFace-bundled models with permissively-licensed alternatives | Drops the `buffalo_l.zip` download (InsightFace, non-commercial-only) and switches to AuraFace-v1 (Apache-2.0) for the embedder and YuNet (MIT) for detection. | Independent licence-hygiene work. Required so any benchmarking done after #51/#16 lands is against the embedder we will actually ship long-term. |
-| [#16][issue-16] | IR recognition pipeline: empirical evaluation + interchangeable backends | After #51 and #52 land, evaluate whether the IR camera path can deliver useful identity matching when run through the *post-#52* embedder with the *post-#51* preprocessing. Land a trait-based backend abstraction so future swaps don't touch call sites. | Without a real open-source IR model, the only honest path is to empirically test the existing one on IR through the new preprocessing. If it works, ship an `ir-primary` profile. If not, document why and open a long-term issue for custom model training. |
+| [#51][issue-51] | Recognition robustness: guided sample variation + illumination preprocessing | v0.5.0 (planned) | Adds CLAHE-style normalisation to the aligned face crop before the embedder, and changes the enrolment UX to actively prompt the user to vary lighting/pose/distance between samples. Bumps the default sample count from 3 to 5. The cheap robustness wins, no model change required, lands first so any later work has an honest baseline. |
+| [#52][issue-52] | Replace InsightFace-bundled models with permissively-licensed alternatives | v0.4.0 (shipped) | Dropped the `buffalo_l.zip` download (InsightFace, non-commercial-only). Default install now fetches AuraFace v1 / `glintr100.onnx` (Apache-2.0, ResNet-100) for the embedder and OpenCV YuNet / `face_detection_yunet_2023mar.onnx` (MIT) for detection. Existing users from v0.3.x must re-enrol — `facegate doctor` detects and lists them. |
+| [#16][issue-16] | IR recognition pipeline: empirical evaluation + interchangeable backends | v0.5.0 (planned) | Evaluates whether the IR camera path can deliver useful identity matching when run through the post-#52 embedder with the post-#51 preprocessing. Lands a trait-based backend abstraction so future swaps don't touch call sites. Without a real open-source IR model, the only honest path is to empirically test the existing one on IR. If it works, ship an `ir-primary` profile. If not, open a long-term issue for custom model training. |
 
-The order matters: **#51 and #52 must both land before #16 produces
-benchmark numbers anyone should trust**. See each issue's "Blocked by"
-header for the dependency wiring.
+The order matters: **#51 must land before #16 produces benchmark
+numbers anyone should trust**. #52 already landed in v0.4.0 so any
+post-v0.4.0 benchmarking is on the model facegate will keep shipping.
+See each issue's "Blocked by" header for the dependency wiring.
 
 ## Honest comparison vs Windows Hello
 
-|  | Windows Hello (today) | Facegate (today) | Facegate (post-#51 + #52 + #16) |
+|  | Windows Hello (today) | Facegate v0.4.0 | Facegate (post-#51 + #16) |
 |---|---|---|---|
 | Primary identity sensor | IR | RGB | RGB primary, IR mode pending #16 evaluation |
 | IR illuminator used | Yes, active and synchronised | Passive (sensor only, no driver-side illuminator control on most laptops) | Same as today |
-| Embedder training spectrum | NIR | RGB (InsightFace ArcFace) | RGB (AuraFace, Apache-2.0) |
-| Embedder licence | Proprietary | Non-commercial only | Apache-2.0 |
+| Embedder training spectrum | NIR | RGB (AuraFace, ResNet-100) | RGB (AuraFace) |
+| Embedder licence | Proprietary | Apache-2.0 | Apache-2.0 |
 | Illumination preprocessing | Implicit (active illuminator) | None | CLAHE on luminance channel |
-| Enrolment guidance | Single-pose with motion prompts | Single condition, multi-sample prompts but no variation guidance | Multi-sample with explicit variation prompts |
+| Enrolment guidance | Single-pose with motion prompts | Multi-sample prompts but no variation guidance | Multi-sample with explicit variation prompts |
 | Lighting robustness | Effectively independent of ambient light | Sensitive — needs re-enrolment per environment | Substantially better via #51; close to Windows Hello only if #16 IR path proves out |
 
 The gap that remains after #51 + #52 + #16 (assuming #16 finds the IR

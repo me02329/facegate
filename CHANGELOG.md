@@ -7,6 +7,39 @@ on a best-effort basis while the IPC protocol stabilises.
 
 ## [Unreleased]
 
+### Changed
+
+- **Default face models swapped for licence cleanup.** v0.3.x downloaded
+  the InsightFace `buffalo_l.zip` bundle, whose pre-trained models are
+  released for non-commercial research use only even though the
+  surrounding code is MIT. v0.4.0 replaces both defaults with
+  permissively-licensed alternatives:
+  - Face detection: **OpenCV YuNet** (`face_detection_yunet_2023mar.onnx`,
+    MIT, ~233 KB). Anchor-free, decoder re-implemented in
+    `facegate_core::detection` to match
+    `opencv/objdetect/face_detect.cpp`. Landmarks remapped from YuNet's
+    `[right_eye, left_eye, nose, right_mouth, left_mouth]` order to the
+    `[left_eye, right_eye, nose, left_mouth, right_mouth]` order
+    ArcFace alignment expects.
+  - Face recognition: **AuraFace v1** (`glintr100.onnx`, Apache-2.0,
+    ResNet-100, ~261 MB) from `fal/AuraFace-v1` on HuggingFace.
+    Drop-in compatible with the existing `ArcFaceEmbedder::extract`
+    pipeline — same 112×112 RGB input, same 512-d L2-normalised output.
+  Install scripts (`install-dev.sh`, `packaging/nfpm/scripts/postinstall.sh`)
+  now fetch the two ONNX files directly from their authoritative
+  HuggingFace mirrors instead of unzipping a bundle, with the YuNet
+  SHA256 pinned and a `TBD-pin-before-release` sentinel on the AuraFace
+  SHA that hard-fails until a release engineer pins the real value. (#52)
+- **Breaking: existing users must re-enrol.** The two embedders sit in
+  different 512-d latent spaces, so templates produced by the v0.3.x
+  ArcFace will never match against captures embedded by AuraFace.
+  `facegate doctor` detects this case (any user whose
+  `embeddings.json` predates the configured embedder model file) and
+  lists the affected users with the `facegate add` command needed.
+  The migration nudge is informational — the broker still loads and
+  password fallback keeps working — so upgrades do not lock anyone
+  out. (#52)
+
 ### Fixed
 
 - PAM helper no longer cuts off legitimate sudo + cross-check auth runs.

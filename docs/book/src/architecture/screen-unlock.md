@@ -39,9 +39,10 @@ This matches the Windows Hello UX — a system event triggers a
 specific process to react, the user never interacts with an unlock
 form, and the camera is released as soon as a decision is made.
 
-Since v0.2.0 the watch daemon does **not** load SCRFD or ArcFace
-either: like the PAM helper, it only captures a frame and submits it
-to the broker. The detector and embedder live exclusively inside
+Since v0.2.0 the watch daemon does **not** load the detector or
+embedder either: like the PAM helper, it only captures a frame and
+submits it to the broker. The detector (YuNet since v0.4.0) and
+embedder (AuraFace since v0.4.0) live exclusively inside
 `facegate-brokerd`.
 
 ## Supported lock screens

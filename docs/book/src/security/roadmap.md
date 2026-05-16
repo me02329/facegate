@@ -67,32 +67,38 @@ is a prerequisite for any honest benchmark of later work.
 
 ## Model licensing — InsightFace bundle replacement
 
-**Status:** not started. Tracked as [#52][issue-52] (v0.4.0).
+**Status:** shipped in v0.4.0. Tracked as [#52][issue-52].
 
-**Problem:** The packaging postinstall script and `install-dev.sh`
-both download the **`buffalo_l.zip` bundle** from
-`github.com/deepinsight/insightface/releases/` and extract the
-detector (SCRFD) and embedder (ArcFace `w600k_r50`) we ship as
-defaults. The InsightFace project documents that its pre-trained
+**Problem (historical, v0.3.x and earlier):** The packaging postinstall
+script and `install-dev.sh` both downloaded the **`buffalo_l.zip`
+bundle** from `github.com/deepinsight/insightface/releases/` and
+extracted the detector (SCRFD) and embedder (ArcFace `w600k_r50`) as
+the defaults. The InsightFace project documents that its pre-trained
 models are released for **non-commercial research use only**, even
 though the surrounding code is MIT. Facegate code is GPL-3.0-or-later
 and binary packages are distributed publicly (GitHub Releases, AUR via
-`facegate-bin`, COPR). We do not redistribute the `.onnx` files inside
-the packages, but our install scripts and shipped configuration
-actively prescribe and fetch them on every install — which is not a
+`facegate-bin`, COPR). We never redistributed the `.onnx` files inside
+the packages, but the install scripts and shipped configuration
+actively prescribed and fetched them on every install — not a
 defensible position for a public OSS project.
 
-**Plan:** switch the defaults to permissively-licensed alternatives:
+**Resolution:** v0.4.0 switched both defaults to permissively-licensed
+alternatives, downloaded directly from their authoritative homes on
+HuggingFace:
 
-- **AuraFace-v1** (Apache-2.0) for the embedder. Explicitly built as a
-  commercial-clean ArcFace alternative; same 112×112 RGB input,
-  512-d output, so it drops into the existing pipeline.
-- **OpenCV YuNet** (MIT) for face detection.
+- **AuraFace-v1** (`fal/AuraFace-v1`, Apache-2.0, ResNet-100,
+  ~261 MB) for the embedder. Explicitly built as a commercial-clean
+  ArcFace alternative; same 112×112 RGB input, 512-d output, no
+  pipeline-side code change required.
+- **OpenCV YuNet** (`opencv/face_detection_yunet`, MIT, ~233 KB) for
+  face detection. Anchor-free, 12 output tensors, decoder re-implemented
+  in `facegate_core::detection` mirroring `opencv/face_detect.cpp`.
 
-The swap is mandatory before any benchmarking against future work, so
-any numbers captured are against the embedder we will actually ship.
-Existing users will need to re-enrol because embeddings from different
-models are not comparable; this is documented in the issue.
+Existing v0.3.x users **must re-enrol** after the upgrade — the two
+embedders sit in different 512-d latent spaces and templates from one
+cannot match against captures from the other. `facegate doctor`
+detects this case (any user whose `embeddings.json` predates the
+configured embedder file is flagged) and prints the migration steps.
 
 ## IR-native and multi-modal recognition
 

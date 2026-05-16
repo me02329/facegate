@@ -24,8 +24,9 @@ service and the `facegate` CLI under `/usr/bin`.
 
 4. The postinstall script creates the `facegate:facegate` system user,
    `/var/lib/facegate` with the correct ownership, fetches the ONNX
-   Runtime shared library and the SCRFD + ArcFace ONNX model files
-   from the configured mirror, and enables `facegate-brokerd.service`.
+   Runtime shared library and the YuNet + AuraFace ONNX model files
+   from their authoritative HuggingFace mirrors, and enables
+   `facegate-brokerd.service`.
 
    The interactive default for the ONNX runtime / model downloads is
    **no** — answer `y` when prompted (or pre-set

@@ -1,9 +1,10 @@
 # Enrolment
 
-A *template* is an ArcFace embedding computed from a capture of your
-face. The broker stores one or more templates per (username, scope)
-pair under `/var/lib/facegate/users/<username>/embeddings.json`, mode
-`0600`, owned by `facegate:facegate`.
+A *template* is an AuraFace embedding (ArcFace-family, ResNet-100,
+512-d) computed from a capture of your face. The broker stores one or
+more templates per (username, scope) pair under
+`/var/lib/facegate/users/<username>/embeddings.json`, mode `0600`,
+owned by `facegate:facegate`.
 
 ## Adding templates
 

@@ -45,12 +45,13 @@ of the planned work:
 This is the extreme case of the lighting-dependence problem above, and
 an expected limitation of the current pipeline rather than a bug.
 
-Facegate's face embedding model is **ArcFace
-(`arcface_w600k_r50.onnx`)**, which is trained on RGB faces in
-reasonably-lit conditions. In low light:
+Facegate's face embedding model is **AuraFace v1
+(`glintr100.onnx`)** since v0.4.0 (previously
+`arcface_w600k_r50.onnx`), an ArcFace-family ResNet-100 trained on RGB
+faces in reasonably-lit conditions. In low light:
 
 - The RGB sensor produces noisy, low-contrast frames.
-- SCRFD (face detection) often fails to detect a face, or detects a
+- YuNet (face detection) often fails to detect a face, or detects a
   poor-quality crop.
 - Even when a face is detected, the embedding drifts far from the
   templates you enrolled in normal light, so the match score falls
@@ -59,12 +60,12 @@ reasonably-lit conditions. In low light:
 **Why not just use the IR camera?** The optional `[camera.ir]` section
 exists, but the IR stream is used *only as a liveness signal* in the
 RGB+IR cross-check (verifying that a face is present and spatially
-aligned with the RGB capture). ArcFace is trained on RGB pixels and
-produces meaningless similarity scores against IR crops — so the broker
-**does not** match against the IR embedding. Doing so would reject
-every genuine user. The [recognition pipeline page][rp] explains why in
-detail, including how Windows Hello solves it with an IR-trained model
-and an active IR illuminator.
+aligned with the RGB capture). The embedder is trained on RGB pixels
+and produces meaningless similarity scores against IR crops — so the
+broker **does not** match against the IR embedding. Doing so would
+reject every genuine user. The [recognition pipeline page][rp]
+explains why in detail, including how Windows Hello solves it with an
+IR-trained model and an active IR illuminator.
 
 **What you can do today:**
 
@@ -81,10 +82,9 @@ and an active IR illuminator.
 
 - [#51][issue-51] (v0.5.0) — illumination preprocessing + guided
   multi-sample enrolment. The cheap robustness wins.
-- [#52][issue-52] (v0.4.0) — replace the InsightFace-bundled models
-  with permissively-licensed alternatives (AuraFace, YuNet). Unrelated
-  to low light directly, but required as the baseline for everything
-  downstream.
+- [#52][issue-52] (v0.4.0, shipped) — model swap to AuraFace + YuNet
+  is now the default install. Unrelated to low light directly, but the
+  baseline that everything downstream measures against.
 - [#16][issue-16] (v0.5.0) — empirical evaluation of the IR camera
   path through the new pipeline + interchangeable backends. If the IR
   path does not work through an RGB-trained embedder, a long-term
@@ -101,7 +101,7 @@ attack than a user-space binary — but the implementations diverge:
 | Aspect | Windows Hello | Facegate |
 |---|---|---|
 | Hardware requirement | Certified IR cameras + depth sensor | Any V4L2 camera (RGB and/or IR) |
-| Face model | Microsoft-proprietary, IR-trained | Open-source ArcFace (RGB-trained) |
+| Face model | Microsoft-proprietary, IR-trained | Open-source AuraFace (ArcFace family, RGB-trained, Apache 2.0) |
 | Identity sensor | IR + active IR illuminator → lighting-invariant | RGB → sensitive to ambient light (see [pipeline page][rp]) |
 | Liveness | Hardware depth + IR | Optional RGB+IR spatial cross-check |
 | Template storage | TPM-sealed | File system, broker-owned (TPM sealing tracked in [#26][issue-26]) |
@@ -157,23 +157,22 @@ Both are tracked but not yet implemented:
   Spoofing or similar) would catch printed photos, replays, and 3D
   masks on single-camera setups.
 
-## Are the SCRFD / ArcFace models the best available?
+## Are the YuNet / AuraFace models the best available?
 
-They're a reasonable open-source baseline, but the bigger story today
-is a **licensing** one. The current `arcface_w600k_r50.onnx` is part of
-the InsightFace `buffalo_l` bundle, whose pre-trained models are
+They're a reasonable open-source baseline. Until v0.3.x facegate
+shipped the InsightFace `buffalo_l` bundle (SCRFD-500M + ArcFace
+`w600k_r50`), whose pre-trained models are
 [released for non-commercial research use only][insightface-licensing]
-even though the surrounding code is MIT. Same goes for the SCRFD
-detector that ships in the same bundle. That is not a comfortable
-place for a publicly-distributed GPL project to sit, and it limits any
-downstream that wants commercial-use-clean dependencies.
+even though the surrounding code is MIT. [#52][issue-52] swapped both
+out in v0.4.0:
 
-[#52][issue-52] (v0.4.0) addresses this directly by switching to:
-
-- **AuraFace-v1** (Apache-2.0) for the embedder — explicitly built as
-  a commercial-clean ArcFace alternative with the same 112×112 RGB
-  input and 512-d output, so it slots into the existing pipeline.
-- **OpenCV YuNet** (MIT) for face detection.
+- **AuraFace-v1** / `glintr100.onnx` (Apache-2.0, ResNet-100) for the
+  embedder. It's the only ArcFace-family model we found that is
+  trained on commercially-licensable data; the trade-off is ~261 MB
+  on disk versus ~166 MB for the previous R50.
+- **OpenCV YuNet** / `face_detection_yunet_2023mar.onnx` (MIT) for
+  detection. 233 KB, anchor-free, designed for edge inference — much
+  smaller than any SCRFD variant.
 
 If you want to know which other research-grade models exist and why
 none of them are silver bullets:
@@ -183,13 +182,13 @@ none of them are silver bullets:
   from InsightFace.
 - **MagFace** — produces a magnitude correlated with face quality;
   useful for rejecting blurry frames before they reach the matcher.
-- **ArcFace `w600k_r100`** — ResNet-100 backbone, ~1-2% better than
-  `r50` but ~2x heavier. Same licence story.
+- **InsightFace's bundled SCRFD variants** (`scrfd_500m`, `scrfd_10g`)
+  — better accuracy/latency curve than YuNet but the same
+  non-commercial licence story as the embedder they ship alongside.
 
-For face detection, SCRFD-500M is a strong efficiency/accuracy tradeoff
-and is unlikely to be a real bottleneck. [#16][issue-16] is the
-architectural prerequisite for swapping backends so model variants can
-be A/B tested without forking the broker.
+[#16][issue-16] is the architectural prerequisite for swapping
+backends so future model variants can be A/B tested without forking
+the broker.
 
 In practice the dominant factor on a working pipeline is **frame
 quality** (lighting, exposure, blur, distance), not the model — which

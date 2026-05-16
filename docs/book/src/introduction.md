@@ -5,9 +5,9 @@
 
 Facegate lets you authenticate with your face for `sudo`, login sessions,
 and screen lock on Linux. It runs entirely on-device — the ML pipeline
-(SCRFD face detection + ArcFace embeddings via ONNX Runtime) lives inside
-a dedicated, sandboxed system daemon (`facegate-brokerd`) that owns all
-biometric templates.
+(YuNet face detection + AuraFace embeddings via ONNX Runtime, both under
+permissive licences since v0.4.0) lives inside a dedicated, sandboxed
+system daemon (`facegate-brokerd`) that owns all biometric templates.
 
 ## What this site covers
 

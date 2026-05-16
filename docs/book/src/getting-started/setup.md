@@ -12,7 +12,7 @@ sudo facegate setup
    RGB based on supported V4L2 formats, and writes the chosen device
    into `/etc/facegate/config.toml`.
 2. **Enrolment** — captures multiple frames of your face (default 5)
-   and submits them to the broker. The broker computes the ArcFace
+   and submits them to the broker. The broker computes the AuraFace
    embeddings and stores them as templates owned by
    `facegate:facegate`.
 3. **PAM wiring** — adds the Facegate PAM line to `sudo`, `login`, or
