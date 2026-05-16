@@ -7,7 +7,6 @@
 #   - atomic, race-free creation of /var/lib/facegate/audit.log;
 #   - hard-fail on missing/mismatched SHA256;
 #   - --fail on curl, no silent HTML-as-tarball;
-#   - explicit unzip availability check;
 #   - try-restart of facegate-brokerd on upgrade;
 #   - distinguishes "systemd absent" from "systemd refused";
 #   - interactive default flipped to "no" for large downloads;
@@ -17,10 +16,27 @@ umask 077
 
 ORT_VERSION="1.24.2"
 MODELS_DIR="/usr/share/facegate/models"
-DETECTOR="$MODELS_DIR/scrfd_500m.onnx"
-EMBEDDER="$MODELS_DIR/arcface_w600k_r50.onnx"
-DETECTOR_SHA256="5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91"
-EMBEDDER_SHA256="4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43"
+
+# Default models (since v0.4.0). Both ship under permissive licences so
+# facegate-bin can be distributed in OSS package repos without inheriting
+# the InsightFace non-commercial restriction the v0.3.x pipeline carried.
+#
+#   YuNet           — face detection, MIT, OpenCV Zoo, ~233 KB
+#   AuraFace v1.0   — face recognition embedder (ResNet-100), Apache 2.0,
+#                     fal/AuraFace-v1 on HuggingFace, ~261 MB
+DETECTOR="$MODELS_DIR/face_detection_yunet_2023mar.onnx"
+EMBEDDER="$MODELS_DIR/glintr100.onnx"
+DETECTOR_URL="https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx"
+EMBEDDER_URL="https://huggingface.co/fal/AuraFace-v1/resolve/main/glintr100.onnx"
+DETECTOR_SHA256="8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+# TODO(release): compute and pin the real glintr100.onnx SHA256 before
+# tagging v0.4.0 — the file is ~261 MB and was not downloaded in the dev
+# environment where this commit landed. Until then, `verify_sha256` will
+# refuse to install the embedder. To verify and pin:
+#   curl -sSL "$EMBEDDER_URL" -o /tmp/glintr100.onnx
+#   sha256sum /tmp/glintr100.onnx
+# then replace TBD below with the value printed.
+EMBEDDER_SHA256="TBD-pin-before-release-see-comment"
 
 # ── facegate system user and group ────────────────────────────────────────────
 
@@ -260,53 +276,37 @@ install_ort() {
 # ── Install face models ───────────────────────────────────────────────────────
 
 install_models() {
-    if ! command -v unzip >/dev/null 2>&1; then
-        echo "Error: 'unzip' is not installed; cannot extract face models." >&2
-        echo "       Install it (e.g. 'apt install unzip' / 'dnf install unzip')" >&2
-        echo "       and rerun 'sudo facegate doctor' for the model setup." >&2
+    # YuNet detector (MIT, ~233 KB)
+    echo "Downloading YuNet face detector (~233 KB)…"
+    if ! http_get "$DETECTOR_URL" "$DETECTOR"; then
+        echo "Error: detector download failed." >&2
+        rm -f "$DETECTOR"
         return 1
     fi
 
-    local url="https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
-    local tmp_zip
-    tmp_zip="$(mktemp /tmp/facegate-models-XXXXXX.zip)"
-    # shellcheck disable=SC2064
-    trap "rm -f '$tmp_zip'" RETURN
-
-    echo "Downloading face recognition models (~400 MB)…"
-    if ! http_get "$url" "$tmp_zip"; then
-        echo "Error: model download failed." >&2
+    # AuraFace embedder (Apache 2.0, ~261 MB)
+    echo "Downloading AuraFace embedder (~261 MB)…"
+    if ! http_get "$EMBEDDER_URL" "$EMBEDDER"; then
+        echo "Error: embedder download failed." >&2
+        rm -f "$EMBEDDER"
         return 1
     fi
-    echo "Extracting…"
-    # -j flattens paths inside the archive, so any directory traversal
-    # entries are neutralised on extraction.
-    unzip -jo "$tmp_zip" "*.onnx"   -d "$MODELS_DIR" 2>/dev/null \
-        || unzip -jo "$tmp_zip" "*/*.onnx" -d "$MODELS_DIR" 2>/dev/null \
-        || true
-
-    for src in det_10g det_500m; do
-        if [ -f "$MODELS_DIR/${src}.onnx" ]; then
-            mv "$MODELS_DIR/${src}.onnx" "$DETECTOR"
-            break
-        fi
-    done
-    for src in w600k_r50 w600k_mbf; do
-        if [ -f "$MODELS_DIR/${src}.onnx" ]; then
-            mv "$MODELS_DIR/${src}.onnx" "$EMBEDDER"
-            break
-        fi
-    done
 
     if ! models_present; then
-        echo "Error: expected ONNX files not found in the archive." >&2
+        echo "Error: expected ONNX files are missing after download." >&2
         echo "       Run 'sudo facegate doctor' for diagnostics." >&2
         return 1
     fi
 
     # Hard-fail on checksum mismatch — these models gate authentication.
-    verify_sha256 "$DETECTOR" "$DETECTOR_SHA256"
-    verify_sha256 "$EMBEDDER" "$EMBEDDER_SHA256"
+    if ! verify_sha256 "$DETECTOR" "$DETECTOR_SHA256"; then
+        rm -f "$DETECTOR" "$EMBEDDER"
+        return 1
+    fi
+    if ! verify_sha256 "$EMBEDDER" "$EMBEDDER_SHA256"; then
+        rm -f "$DETECTOR" "$EMBEDDER"
+        return 1
+    fi
     chmod 644 "$DETECTOR" "$EMBEDDER"
     echo "✓ Face models installed and verified."
 }
@@ -336,7 +336,7 @@ echo ""
 if models_present; then
     echo "✓ Face recognition models already installed."
 elif is_interactive; then
-    if ask_yn "Download face recognition models? (~400 MB)"; then
+    if ask_yn "Download face recognition models? (~261 MB)"; then
         install_models || echo "Warning: model install failed; see 'sudo facegate doctor'." >&2
     else
         echo "Skipped. Run 'sudo facegate doctor' for manual install instructions."
@@ -345,7 +345,7 @@ else
     cat <<'MSG'
 Note: face recognition models are required but were not found.
   Run 'sudo facegate doctor' after installation for step-by-step instructions
-  (we don't auto-download 400 MB during a non-interactive package install).
+  (we don't auto-download ~261 MB during a non-interactive package install).
 MSG
 fi
 

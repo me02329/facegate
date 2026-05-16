@@ -9,8 +9,17 @@
 set -euo pipefail
 
 ORT_VERSION="1.24.2"
-DETECTOR_SHA256="5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91"
-EMBEDDER_SHA256="4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43"
+
+# Default models (since v0.4.0): YuNet for detection (MIT), AuraFace v1 /
+# glintr100 for the embedding (Apache 2.0). Both replace the
+# InsightFace `buffalo_l` bundle that v0.3.x downloaded under a
+# non-commercial pretrained-model licence.
+DETECTOR_URL="https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx"
+EMBEDDER_URL="https://huggingface.co/fal/AuraFace-v1/resolve/main/glintr100.onnx"
+DETECTOR_SHA256="8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+# TODO(release): pin the real glintr100.onnx SHA256 before tagging
+# v0.4.0; see packaging/nfpm/scripts/postinstall.sh for the same TODO.
+EMBEDDER_SHA256="TBD-pin-before-release-see-comment"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -85,41 +94,32 @@ download_ort() {
 
 download_models() {
   local models_dir="$1"
-  local detector="$models_dir/scrfd_500m.onnx"
-  local embedder="$models_dir/arcface_w600k_r50.onnx"
+  local detector="$models_dir/face_detection_yunet_2023mar.onnx"
+  local embedder="$models_dir/glintr100.onnx"
 
-  local url="https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
-  local tmp_zip
-  tmp_zip="$(mktemp /tmp/facegate-models-XXXXXX.zip)"
-
-  echo "    Source : $url"
-  echo "    Size   : ~400 MB"
+  echo "    Detector : YuNet (MIT, ~233 KB)"
+  echo "    Embedder : AuraFace v1 / glintr100 (Apache 2.0, ~261 MB)"
   echo ""
 
-  http_get "$url" "$tmp_zip"
-
-  echo ""
-  echo "    Extracting ONNX models..."
-  unzip -jo "$tmp_zip" "*.onnx"   -d "$models_dir" 2>/dev/null || \
-  unzip -jo "$tmp_zip" "*/*.onnx" -d "$models_dir" 2>/dev/null || true
-
-  rm -f "$tmp_zip"
-
-  for src in det_10g det_500m; do
-    [[ -f "$models_dir/${src}.onnx" ]] && mv "$models_dir/${src}.onnx" "$detector" && break
-  done
-  for src in w600k_r50 w600k_mbf; do
-    [[ -f "$models_dir/${src}.onnx" ]] && mv "$models_dir/${src}.onnx" "$embedder" && break
-  done
+  http_get "$DETECTOR_URL" "$detector"
+  http_get "$EMBEDDER_URL" "$embedder"
 
   if [[ -f "$detector" && -f "$embedder" ]]; then
-    verify_sha256 "$detector" "$DETECTOR_SHA256"
-    verify_sha256 "$embedder" "$EMBEDDER_SHA256"
+    if ! verify_sha256 "$detector" "$DETECTOR_SHA256"; then
+      rm -f "$detector" "$embedder"
+      echo "Error: detector checksum mismatch; removed downloads." >&2
+      return 1
+    fi
+    if ! verify_sha256 "$embedder" "$EMBEDDER_SHA256"; then
+      rm -f "$detector" "$embedder"
+      echo "Error: embedder checksum mismatch; removed downloads." >&2
+      return 1
+    fi
     echo "    Detector : $detector  ($(du -sh "$detector" | cut -f1))"
     echo "    Embedder : $embedder  ($(du -sh "$embedder" | cut -f1))"
   else
     echo ""
-    echo "Warning: expected ONNX files not found in the archive." >&2
+    echo "Warning: expected ONNX files not found after download." >&2
     echo "         Files in $models_dir:" >&2
     ls "$models_dir" >&2 || true
     echo "         Update [models] in /etc/facegate/config.toml to match." >&2
@@ -245,8 +245,8 @@ fi
 
 # ── Face recognition models ───────────────────────────────────────────────────
 MODELS_DIR="/usr/share/facegate/models"
-DETECTOR="$MODELS_DIR/scrfd_500m.onnx"
-EMBEDDER="$MODELS_DIR/arcface_w600k_r50.onnx"
+DETECTOR="$MODELS_DIR/face_detection_yunet_2023mar.onnx"
+EMBEDDER="$MODELS_DIR/glintr100.onnx"
 
 if [[ $SKIP_MODELS -eq 1 ]]; then
   echo "==> Skipping model download (--skip-models)."
